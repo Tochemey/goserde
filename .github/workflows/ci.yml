@@ -22,8 +22,14 @@ jobs:
         run: go build ./...
       - name: vet
         run: go vet ./...
-      - name: test (race)
-        run: go test -race -count=1 ./...
+      - name: test (race + coverage)
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: Tochemey/goserde
+          files: ./coverage.out
       - name: generated code is up to date
         run: |
           go generate ./...

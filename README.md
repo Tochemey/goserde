@@ -1,6 +1,7 @@
 # goserde
 
 [![CI](https://img.shields.io/github/actions/workflow/status/tochemey/goserde/ci.yml?branch=main&label=CI)](https://github.com/tochemey/goserde/actions/workflows/ci.yml)
+[![codecov](https://img.shields.io/codecov/c/github/tochemey/goserde?branch=main)](https://codecov.io/gh/tochemey/goserde)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tochemey/goserde.svg)](https://pkg.go.dev/github.com/tochemey/goserde)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -263,6 +264,3 @@ go generate ./...     # regenerate codecs after editing annotated structs
 make bench-shapes     # benchmark across struct shapes
 make compare          # head-to-head vs mus and benc (needs network)
 ```
-
-The repository is tested with the race detector and fuzzing, vetted, and linted
-with `golangci-lint` on every push (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
