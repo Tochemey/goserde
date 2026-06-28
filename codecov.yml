@@ -1,0 +1,6 @@
+# Codecov configuration.
+#
+# benchcompare is a separate, optional module holding the competitor benchmarks
+# (mus, benc). It is not part of the library and is excluded from coverage.
+ignore:
+  - "benchcompare"

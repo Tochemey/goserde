@@ -1,0 +1,85 @@
+name: Performance issue
+description: Report a throughput, latency, or allocation problem with reproducible numbers.
+title: "perf: "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Performance reports are most actionable with **numbers and a reproducible benchmark**. The repo ships a benchmark harness (`make bench`, `make bench-shapes`, `make compare`) you can adapt. Prefer `b.Loop()` so the compiler does not optimize the measured work away.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is slow or allocates more than expected, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Struct and workload
+      description: The annotated struct (or its shape) and what you measured. Include field types, payload size, and whether you Marshal, Unmarshal, or both.
+      placeholder: |
+        type T struct { ID uint64; Tags []string; Meta map[string]int64 }
+        - Operation: Unmarshal into a fresh value
+        - Payload: ~200 B
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed numbers
+      description: Paste the `go test -bench -benchmem` output (ns/op, B/op, allocs/op). State how you measured.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected or target numbers
+      description: What you hoped for, and why (a prior version, another serializer, a back-of-envelope estimate).
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Fast (default)
+        - Safe (-safe)
+    validations:
+      required: true
+  - type: dropdown
+    id: reuse
+    attributes:
+      label: Destination reuse
+      description: For decode, were you reusing the destination value across calls (which reuses slices and maps)?
+      options:
+        - Fresh value each call
+        - Reused destination
+        - Not applicable (encode)
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: CPU (model and cores), OS and architecture, and Go version.
+      placeholder: "Apple M1, macOS 15 arm64, Go 1.26"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Profiles and benchmark code
+      description: Attach the benchmark function, a benchstat comparison, or pprof/`-cpuprofile`/`-memprofile` output where relevant.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: The numbers above are reproducible and I described how I measured them.
+          required: true
+        - label: My benchmark uses b.Loop() (or otherwise prevents dead-code elimination).
+          required: false

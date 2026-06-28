@@ -1,0 +1,362 @@
+// MIT License
+//
+// Copyright (c) 2026 Arsene Tochemey Gandote
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Command goserdegen generates fast Marshal/Unmarshal/Size methods for Go structs
+// annotated with a `//goserde:generate` marker comment.
+//
+// Usage:
+//
+//	goserdegen -dir . -out goserde_gen.go
+//
+// It loads every .go file in -dir, type-checks the package using the standard
+// library (no external deps), finds structs whose doc comment contains the
+// marker, and emits codec methods shaped exactly like the hand-tuned reference
+// in runtime/record.go.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"go/ast"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"slices"
+	"strings"
+)
+
+// marker is the directive comment that flags a struct for codec generation. It
+// has no leading space after // so it reads as a Go directive, not prose.
+const marker = "goserde:generate"
+
+// unionMarker is the directive comment that declares an interface as a tagged
+// union, followed by the space-separated names of its concrete member structs,
+// e.g. `//goserde:union Circle Square`. Member order fixes the on-wire tag IDs.
+const unionMarker = "goserde:union"
+
+// defaultRuntimePkg is the import path of the goserde runtime primitives package.
+// It is the fallback used only when the build metadata needed to derive the path
+// automatically is unavailable.
+const defaultRuntimePkg = "github.com/tochemey/goserde/runtime"
+
+// runtimePkgPath returns the import path of the runtime primitives package whose
+// functions the generated code calls. It is derived from the module that built
+// goserdegen, so a fork published under a different module path generates code
+// against its own runtime package with no configuration.
+func runtimePkgPath() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Path != "" {
+		return bi.Main.Path + "/runtime"
+	}
+
+	return defaultRuntimePkg
+}
+
+// main parses flags, loads and type-checks the target package, generates the
+// codec source, and writes it next to the package.
+func main() {
+	dir := flag.String("dir", ".", "directory containing the package to scan")
+	out := flag.String("out", "goserde_gen.go", "output file name (written into -dir)")
+	safe := flag.Bool("safe", false, "emit bounds-checked Unmarshal that returns runtime.ErrShortBuffer on truncated input instead of panicking")
+	flag.Parse()
+
+	g, err := load(*dir, runtimePkgPath(), *safe)
+	if err != nil {
+		fatal(err)
+	}
+
+	src, err := g.generate()
+	if err != nil {
+		fatal(err)
+	}
+
+	outPath := filepath.Join(*dir, *out)
+	if err := os.WriteFile(outPath, src, 0o644); err != nil {
+		fatal(err)
+	}
+
+	// Writes to stdout never meaningfully fail here; the error is discarded.
+	_, _ = fmt.Printf("goserdegen: wrote %s (%d types)\n", outPath, len(g.targets))
+}
+
+// fatal reports err to stderr with the tool prefix and exits non-zero. The
+// stderr write cannot be acted on, so its error is intentionally discarded.
+func fatal(err error) {
+	_, _ = fmt.Fprintln(os.Stderr, "goserdegen:", err)
+	os.Exit(1)
+}
+
+// generator holds the type-checked package and the resolved settings used while
+// emitting a codec file.
+type generator struct {
+	pkgName     string                          // name of the package being generated into
+	runtimePkg  string                          // import path of the runtime primitives package
+	runtimeQual string                          // package selector used in emitted code, e.g. "runtime"
+	safe        bool                            // emit bounds-checked Unmarshal (returns ErrShortBuffer)
+	pkg         *types.Package                  // the package being generated into (for type qualifying)
+	usedTime    bool                            // set during emission when any field is time.Time
+	targets     []*types.Named                  // annotated structs to generate codecs for, sorted by name
+	unions      map[*types.Named][]*types.Named // union interface -> ordered concrete members
+}
+
+// load parses and type-checks the package in dir using only the standard
+// library, collects the structs carrying the marker, and returns a generator
+// ready to emit. runtimePkg is the import path of the runtime primitives package
+// and safe selects bounds-checked decoding.
+func load(dir, runtimePkg string, safe bool) (*generator, error) {
+	fset := token.NewFileSet()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse every non-test, non-generated .go file in dir, collecting the package
+	// files, the type names carrying the marker, and any union directives. Using
+	// parser.ParseFile (not the deprecated parser.ParseDir / ast.Package) keeps
+	// goserdegen stdlib-only: it never reaches for go/packages, which needs the
+	// network.
+	var files []*ast.File
+	marked := map[string]bool{}
+	unionDecls := map[string][]string{}
+	pkgName := ""
+
+	for _, entry := range entries {
+		name := entry.Name()
+
+		if entry.IsDir() ||
+			!strings.HasSuffix(name, ".go") ||
+			strings.HasSuffix(name, "_test.go") ||
+			name == "goserde_gen.go" {
+			continue
+		}
+
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+
+		if pkgName == "" {
+			pkgName = f.Name.Name
+		}
+
+		files = append(files, f)
+		collectMarked(f, marked)
+		collectUnions(f, unionDecls)
+	}
+
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no Go package found in %s", dir)
+	}
+
+	conf := types.Config{Importer: importer.Default()}
+	info := &types.Info{
+		Defs: map[*ast.Ident]types.Object{},
+	}
+
+	tpkg, err := conf.Check(pkgName, fset, files, info)
+	if err != nil {
+		return nil, fmt.Errorf("type-check: %w", err)
+	}
+
+	runtimeQual := runtimePkg
+	if i := strings.LastIndex(runtimeQual, "/"); i >= 0 {
+		runtimeQual = runtimeQual[i+1:]
+	}
+
+	g := &generator{pkgName: pkgName, runtimePkg: runtimePkg, runtimeQual: runtimeQual, safe: safe, pkg: tpkg}
+	scope := tpkg.Scope()
+
+	for _, name := range scope.Names() {
+		if !marked[name] {
+			continue
+		}
+
+		obj := scope.Lookup(name)
+
+		named, ok := obj.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+
+		if _, ok := named.Underlying().(*types.Struct); !ok {
+			return nil, fmt.Errorf("%s: goserde:generate only supports structs", name)
+		}
+
+		g.targets = append(g.targets, named)
+	}
+
+	slices.SortFunc(g.targets, func(a, b *types.Named) int {
+		return strings.Compare(a.Obj().Name(), b.Obj().Name())
+	})
+
+	if len(g.targets) == 0 {
+		return nil, fmt.Errorf("no types marked with //%s found", marker)
+	}
+
+	if err := g.resolveUnions(unionDecls, scope); err != nil {
+		return nil, err
+	}
+
+	return g, nil
+}
+
+// resolveUnions turns the raw union directives (interface name -> member names)
+// into typed registry entries on g, validating that each interface is really an
+// interface and each member is a generation target whose pointer implements it.
+func (g *generator) resolveUnions(decls map[string][]string, scope *types.Scope) error {
+	g.unions = map[*types.Named][]*types.Named{}
+
+	for ifaceName, memberNames := range decls {
+		obj := scope.Lookup(ifaceName)
+		if obj == nil {
+			return fmt.Errorf("//%s on unknown type %s", unionMarker, ifaceName)
+		}
+
+		ifaceNamed, ok := obj.Type().(*types.Named)
+		if !ok {
+			return fmt.Errorf("//%s %s is not a named type", unionMarker, ifaceName)
+		}
+
+		iface, ok := ifaceNamed.Underlying().(*types.Interface)
+		if !ok {
+			return fmt.Errorf("//%s %s is not an interface type", unionMarker, ifaceName)
+		}
+
+		if len(memberNames) == 0 {
+			return fmt.Errorf("//%s %s lists no member types", unionMarker, ifaceName)
+		}
+
+		var members []*types.Named
+		for _, name := range memberNames {
+			mObj := scope.Lookup(name)
+			if mObj == nil {
+				return fmt.Errorf("//%s %s: unknown member type %s", unionMarker, ifaceName, name)
+			}
+
+			mNamed, ok := mObj.Type().(*types.Named)
+			if !ok || !g.isTarget(mNamed) {
+				return fmt.Errorf("//%s %s: member %s must be a //%s struct", unionMarker, ifaceName, name, marker)
+			}
+
+			if !types.Implements(types.NewPointer(mNamed), iface) {
+				return fmt.Errorf("//%s %s: *%s does not implement %s", unionMarker, ifaceName, name, ifaceName)
+			}
+
+			members = append(members, mNamed)
+		}
+
+		g.unions[ifaceNamed] = members
+	}
+
+	return nil
+}
+
+// collectMarked records into marked the name of every type declaration in f
+// whose doc comment carries the marker, whether on the declaration or the spec.
+func collectMarked(f *ast.File, marked map[string]bool) {
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+
+		// Marker may be on the GenDecl (single type) or per-spec.
+		declHas := commentHasMarker(gd.Doc)
+
+		for _, spec := range gd.Specs {
+			ts := spec.(*ast.TypeSpec)
+
+			if declHas || commentHasMarker(ts.Doc) {
+				marked[ts.Name.Name] = true
+			}
+		}
+	}
+}
+
+// collectUnions records, for each interface type declaration carrying a
+// //goserde:union directive, the ordered list of member type names named by the
+// directive. The directive may sit on the GenDecl or the individual TypeSpec.
+func collectUnions(f *ast.File, unions map[string][]string) {
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+
+		for _, spec := range gd.Specs {
+			ts := spec.(*ast.TypeSpec)
+
+			if _, ok := ts.Type.(*ast.InterfaceType); !ok {
+				continue
+			}
+
+			members := unionMembers(gd.Doc)
+			if members == nil {
+				members = unionMembers(ts.Doc)
+			}
+
+			if members != nil {
+				unions[ts.Name.Name] = members
+			}
+		}
+	}
+}
+
+// unionMembers returns the member type names listed by a //goserde:union
+// directive in cg, or nil when cg carries no such directive. It scans raw
+// comment lines because go/ast strips directive comments from CommentGroup.Text.
+func unionMembers(cg *ast.CommentGroup) []string {
+	if cg == nil {
+		return nil
+	}
+
+	for _, c := range cg.List {
+		text := strings.TrimSpace(strings.TrimPrefix(c.Text, "//"))
+
+		if rest, ok := strings.CutPrefix(text, unionMarker); ok {
+			return strings.Fields(rest)
+		}
+	}
+
+	return nil
+}
+
+// commentHasMarker reports whether the comment group cg contains the marker
+// directive. It scans the raw comment lines because go/ast strips directive
+// comments (no space after //) from CommentGroup.Text.
+func commentHasMarker(cg *ast.CommentGroup) bool {
+	if cg == nil {
+		return false
+	}
+
+	for _, c := range cg.List {
+		if strings.Contains(c.Text, marker) {
+			return true
+		}
+	}
+
+	return false
+}

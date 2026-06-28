@@ -1,0 +1,12 @@
+github.com/deneonet/benc v1.1.8 h1:Qk9diyH0UcnduvCrZ62mBrwUeSZzte4kQxMbclVdhW4=
+github.com/deneonet/benc v1.1.8/go.mod h1:UCfkM5Od0B2huwv/ZItvtUb7QnALFt9YXtX8NXX4Lts=
+github.com/mus-format/common-go v0.0.0-20260324174526-3d8f1741b5a2 h1:oob6maWbVV+yevC1EawGOSyqcU2Cvj3ZWAF0FKoT+uU=
+github.com/mus-format/common-go v0.0.0-20260324174526-3d8f1741b5a2/go.mod h1:XhSTID+Ln32bHgJQjtizWsMFY219tfWa4sObJxHhATw=
+github.com/mus-format/mus-go v0.10.2 h1:B9iqKL3V16Vqj48VGqEApAyP+uY+y4T/bUC49RC76dA=
+github.com/mus-format/mus-go v0.10.2/go.mod h1:YUJGLqibVueaC8g0YTcsq6kXdtgdLxlyAUWoUmjRRe0=
+github.com/ymz-ncnk/assert v0.0.0-20260108210721-155bc9aa4282 h1:lU0oPVPOGW0BZwLwAqfSTh1yxhFbwXDv/UAYY54QTq0=
+github.com/ymz-ncnk/assert v0.0.0-20260108210721-155bc9aa4282/go.mod h1:+lSOTrCyOPuvc0xuvK4uKhgQ0Ar3U/HJPpJZg73kvgE=
+github.com/ymz-ncnk/mok v0.2.2 h1:MkHkli+n3Ci6Xla9e/6LApJZ6/XjLB6AB3IXDr9a7hk=
+github.com/ymz-ncnk/mok v0.2.2/go.mod h1:oG5QOzlimZyay1H6edXmCSd7YmcRhAm1j7qC8QcmWzM=
+golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa h1:FRnLl4eNAQl8hwxVVC17teOw8kdjVDVAiFMtgUdTSRQ=
+golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa/go.mod h1:zk2irFbV9DP96SEBUUAy67IdHUaZuSnrz1n472HUCLE=

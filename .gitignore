@@ -1,0 +1,40 @@
+# Compiled binaries and build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go fuzzing corpus generated locally (seed corpora live in testdata/fuzz and are committed)
+# Nothing to ignore here by default; failing-case corpus entries SHOULD be committed.
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Dependency vendor directory (this module is dependency-free)
+/vendor/
+
+# IDE and editor files
+/.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+.trunk/
+.gocache/
+.cache/
+.gomodcache/
+.claude/

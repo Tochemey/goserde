@@ -1,0 +1,26 @@
+# golangci-lint configuration (v2 schema). Lints the root module only; the
+# nested benchcompare module is optional and has external dependencies.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # The standard set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  exclusions:
+    # Skip generated codecs (they carry the "Code generated ... DO NOT EDIT" marker).
+    generated: lax
+    paths:
+      - '.*_gen\.go$'
+    rules:
+      # Tests and benchmarks intentionally discard the Unmarshal error on inputs
+      # they just produced themselves.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

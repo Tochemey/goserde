@@ -1,0 +1,129 @@
+name: Bug report
+description: Report something that does not work as documented or expected.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please search existing issues first to avoid duplicates.
+
+        Do **not** report security vulnerabilities here. Follow the [security policy](https://github.com/tochemey/goserde/blob/main/SECURITY.md) instead.
+
+        Note: in **fast mode** goserde assumes trusted bytes produced on the same architecture and Go version. Mismatched architectures or corrupt input are expected to misbehave there; use `-safe` mode for bounds-checked, portable decoding.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: A clear, concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest reproduction you can manage. A minimal annotated struct plus a short program (or a failing test) is ideal.
+      placeholder: |
+        1. Annotate this struct with `//goserde:generate`:
+           type T struct { ... }
+        2. Run `go generate ./...`
+        3. Marshal then Unmarshal a value with `...`
+        4. Observe `...`
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact panic message or wrong value, if any.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where does the bug occur?
+      options:
+        - Code generator (cmd/goserdegen)
+        - Runtime primitives (runtime)
+        - Generated code (goserde_gen.go)
+        - Convenience API (Bytes / Into / From)
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: Which codec mode was the package generated in?
+      options:
+        - Fast (default)
+        - Safe (-safe)
+        - Not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: fieldtype
+    attributes:
+      label: Field type involved
+      description: The field type that triggers the bug, if you can isolate it.
+      options:
+        - Integers (int / uint, any width)
+        - Floats (float32 / float64)
+        - bool
+        - string
+        - "[]byte"
+        - Slice of a supported element
+        - Fixed array [N]T
+        - Map
+        - Pointer
+        - Nested struct
+        - time.Time
+        - Tagged union (interface)
+        - Struct tag (goserde:"-")
+        - All-fixed-width / blittable struct
+        - Not sure / multiple
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: goserde version
+      description: The release tag or commit SHA you are on.
+      placeholder: "v0.1.0 (or commit abc1234)"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and CPU architecture, plus Go version. Architecture matters because fast mode uses the native memory layout.
+      placeholder: "macOS 15 arm64, Go 1.26"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Panic, stack trace, or generated code
+      description: Paste the panic/stack trace, or the relevant snippet of the generated goserde_gen.go. This is rendered as a code block, so no backticks are needed.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I reduced this to the smallest reproduction I could.
+          required: true
+        - label: I committed the freshly generated goserde_gen.go (not a stale one).
+          required: false
+        - label: I am willing to help test a fix.
+          required: false

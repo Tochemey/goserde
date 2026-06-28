@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race -count=1 ./...
+      - name: generated code is up to date
+        run: |
+          go generate ./...
+          git diff --exit-code
+
+  fuzz-smoke:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: fuzz round-trip (fast)
+        run: go test ./test/data/shapes/ -run '^$' -fuzz '^FuzzRoundTrip$' -fuzztime 30s
+      - name: fuzz decode (safe)
+        run: go test ./test/data/safeshapes/ -run '^$' -fuzz '^FuzzAllDecode$' -fuzztime 30s
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
