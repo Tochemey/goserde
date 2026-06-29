@@ -20,31 +20,27 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package example
+package codec
 
-//go:generate go run ../../../cmd/goserdegen -dir . -out goserde_gen.go
+import "math"
 
-// User is an annotated fixture mixing fixed-width fields with variable-length
-// strings and slices; goserdegen generates its codec.
-//
-//goserde:generate
-type User struct {
-	ID       uint64   // fixed-width identifier
-	Age      uint16   // fixed-width
-	Height   float32  // fixed-width IEEE 754
-	Verified bool     // single-byte flag
-	Name     string   // length-prefixed bytes, decoded zero-copy
-	Nicks    []string // length-prefixed slice of length-prefixed strings
-	Scores   []int32  // length-prefixed slice of fixed-width elements
-	Avatar   []byte   // length-prefixed raw bytes, decoded zero-copy
-}
+// F64bits returns the IEEE 754 binary representation of f, the bit pattern that
+// generated code writes for a float64 field.
+func F64bits(f float64) uint64 { return math.Float64bits(f) }
 
-// Point is an all-fixed-width fixture, so its generated codec takes the
-// blittable memmove fast path.
-//
-//goserde:generate
-type Point struct {
-	X int32 // fixed-width coordinate
-	Y int32 // fixed-width coordinate
-	Z int32 // fixed-width coordinate
-}
+// Bitsf64 returns the float64 whose IEEE 754 binary representation is u. It is
+// the inverse of [F64bits] and is used to decode a float64 field.
+func Bitsf64(u uint64) float64 { return math.Float64frombits(u) }
+
+// F32bits returns the IEEE 754 binary representation of f, the bit pattern that
+// generated code writes for a float32 field.
+func F32bits(f float32) uint32 { return math.Float32bits(f) }
+
+// Bitsf32 returns the float32 whose IEEE 754 binary representation is u. It is
+// the inverse of [F32bits] and is used to decode a float32 field.
+func Bitsf32(u uint32) float32 { return math.Float32frombits(u) }
+
+// f64bits and bitsf64 are unexported aliases used by the hand-written reference
+// codec in record.go so it reads like generator output without a package prefix.
+func f64bits(f float64) uint64 { return F64bits(f) }
+func bitsf64(u uint64) float64 { return Bitsf64(u) }

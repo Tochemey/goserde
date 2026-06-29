@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package runtime
+package codec
 
 // Marshaler is implemented by every generated codec. Size reports the exact
 // number of bytes Marshal will write, letting callers size a buffer once.

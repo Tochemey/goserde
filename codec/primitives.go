@@ -20,10 +20,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package runtime contains the runtime primitives that generated codecs call.
+// Package codec is the support library that goserde codecs are built on. It
+// serves two audiences, both supported and both covered by the module's
+// semantic-versioning promise:
+//
+//   - Convenience helpers for everyday use: [Bytes], [Into], and [From], plus
+//     the [Marshaler] and [Unmarshaler] interfaces that every codec implements.
+//   - Low-level encoding primitives for writing a codec by hand when you want
+//     full control instead of running goserdegen: the fixed-width readers and
+//     writers ([U32]/[PutU32] and friends), the varint codec ([Uvarint],
+//     [PutUvarint], [UvarintSize]), the zigzag transform ([Zig]/[Zag]), the
+//     zero-copy string conversions ([B2S]/[S2B]), and the float bit-casts. Code
+//     emitted by goserdegen calls these same primitives, so a hand-written codec
+//     and a generated one share an identical wire format.
+//
 // Everything here is written to be inlined by the Go compiler and to avoid
 // bounds checks and allocations on the hot path.
-package runtime
+package codec
 
 import (
 	"errors"

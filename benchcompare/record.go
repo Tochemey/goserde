@@ -22,9 +22,9 @@
 
 package benchcompare
 
-import "github.com/tochemey/goserde/runtime"
+import "github.com/tochemey/goserde/codec"
 
-// Record mirrors runtime.Record exactly, so goserde and mus serialize identical data.
+// Record mirrors codec.Record exactly, so goserde and mus serialize identical data.
 type Record struct {
 	ID     uint64
 	Score  float64
@@ -38,50 +38,50 @@ type Record struct {
 
 func (r *Record) Size() int {
 	s := 8 + 8 + 1
-	s += runtime.UvarintSize(uint64(len(r.Name))) + len(r.Name)
-	s += runtime.UvarintSize(uint64(len(r.Tags))) + 4*len(r.Tags)
-	s += runtime.UvarintSize(uint64(len(r.Blob))) + len(r.Blob)
+	s += codec.UvarintSize(uint64(len(r.Name))) + len(r.Name)
+	s += codec.UvarintSize(uint64(len(r.Tags))) + 4*len(r.Tags)
+	s += codec.UvarintSize(uint64(len(r.Blob))) + len(r.Blob)
 	return s
 }
 
 func (r *Record) Marshal(b []byte) int {
-	runtime.PutU64(b[0:], r.ID)
-	runtime.PutU64(b[8:], runtime.F64bits(r.Score))
+	codec.PutU64(b[0:], r.ID)
+	codec.PutU64(b[8:], codec.F64bits(r.Score))
 	if r.Active {
 		b[16] = 1
 	} else {
 		b[16] = 0
 	}
 	i := 17
-	i += runtime.PutUvarint(b[i:], uint64(len(r.Name)))
-	i += copy(b[i:], runtime.S2B(r.Name))
-	i += runtime.PutUvarint(b[i:], uint64(len(r.Tags)))
+	i += codec.PutUvarint(b[i:], uint64(len(r.Name)))
+	i += copy(b[i:], codec.S2B(r.Name))
+	i += codec.PutUvarint(b[i:], uint64(len(r.Tags)))
 	for _, t := range r.Tags {
-		runtime.PutU32(b[i:], t)
+		codec.PutU32(b[i:], t)
 		i += 4
 	}
-	i += runtime.PutUvarint(b[i:], uint64(len(r.Blob)))
+	i += codec.PutUvarint(b[i:], uint64(len(r.Blob)))
 	i += copy(b[i:], r.Blob)
 	return i
 }
 
 func (r *Record) Unmarshal(b []byte) (int, error) {
-	r.ID = runtime.U64(b[0:])
-	r.Score = runtime.Bitsf64(runtime.U64(b[8:]))
+	r.ID = codec.U64(b[0:])
+	r.Score = codec.Bitsf64(codec.U64(b[8:]))
 	r.Active = b[16] != 0
 	i := 17
-	n, c := runtime.Uvarint(b[i:])
+	n, c := codec.Uvarint(b[i:])
 	i += c
-	r.Name = runtime.B2S(b[i : i+int(n)])
+	r.Name = codec.B2S(b[i : i+int(n)])
 	i += int(n)
-	n, c = runtime.Uvarint(b[i:])
+	n, c = codec.Uvarint(b[i:])
 	i += c
 	r.Tags = make([]uint32, n)
 	for j := range r.Tags {
-		r.Tags[j] = runtime.U32(b[i:])
+		r.Tags[j] = codec.U32(b[i:])
 		i += 4
 	}
-	n, c = runtime.Uvarint(b[i:])
+	n, c = codec.Uvarint(b[i:])
 	i += c
 	r.Blob = b[i : i+int(n)]
 	i += int(n)

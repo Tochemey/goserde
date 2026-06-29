@@ -1,6 +1,6 @@
-# goserde
+# goSerde
 
-[![CI](https://img.shields.io/github/actions/workflow/status/tochemey/goserde/ci.yml?branch=main&label=CI)](https://github.com/tochemey/goserde/actions/workflows/ci.yml)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/tochemey/goserde/ci.yml)](https://github.com/tochemey/goserde/actions/workflows/ci.yml)
 [![codecov](https://img.shields.io/codecov/c/github/tochemey/goserde?branch=main)](https://codecov.io/gh/tochemey/goserde)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tochemey/goserde.svg)](https://pkg.go.dev/github.com/tochemey/goserde)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -18,7 +18,7 @@ Marshal    14 ns/op    0 allocs     (28× faster than encoding/json)
 Unmarshal  28 ns/op    1 alloc      (81× faster than encoding/json)
 ```
 
-## Is goserde for you?
+## Is goSerde for you?
 
 **Use it when** you control both the encoder and the decoder and want the
 smallest, fastest possible binary representation: RPC between your own services,
@@ -35,7 +35,7 @@ schema-evolving format such as Protobuf, Cap'n Proto, or FlatBuffers.
 ## Install
 
 ```bash
-# The runtime library (imported by generated code)
+# The codec support library (imported by generated code)
 go get github.com/tochemey/goserde
 
 # The code generator
@@ -70,16 +70,16 @@ go generate ./...
 Encode and decode with the convenience helpers:
 
 ```go
-import "github.com/tochemey/goserde/runtime"
+import "github.com/tochemey/goserde/codec"
 
 u := &User{ID: 1, Name: "ada", Tags: []int32{1, 2, 3}}
 
 // Encode into a fresh, exactly sized buffer.
-data := runtime.Bytes(u)
+data := codec.Bytes(u)
 
 // Decode.
 var out User
-if err := runtime.From(&out, data); err != nil {
+if err := codec.From(&out, data); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -88,7 +88,7 @@ On the hot path, drive the generated methods directly and reuse buffers to stay
 allocation-free:
 
 ```go
-buf = runtime.Into(u, buf) // reuses buf when it has capacity, else allocates
+buf = codec.Into(u, buf) // reuses buf when it has capacity, else allocates
 
 var out User
 out.Unmarshal(data)        // returns (bytesRead int, err error)
@@ -149,17 +149,17 @@ type Drawing struct {
 On the wire a union is a varint tag (`0` = nil, `1` = first member, …) followed
 by the member's payload. **Member order is the wire contract**: only ever
 append new members, never reorder. Decoding an unknown tag returns
-`runtime.ErrUnknownUnionTag` rather than panicking.
+`codec.ErrUnknownUnionTag` rather than panicking.
 
 ## Modes
 
 A package is generated in exactly one mode; the method signatures are identical,
 so callers don't change.
 
-| Mode               | Flag    | Unmarshal on bad input           | Decoded `string`/`[]byte` | Portable            |
-|--------------------|---------|----------------------------------|---------------------------|---------------------|
-| **Fast** (default) | none    | may panic (trusted bytes)        | zero-copy (aliases input) | no (native memory)  |
-| **Safe**           | `-safe` | returns `runtime.ErrShortBuffer` | copied (owns its bytes)   | yes (little-endian) |
+| Mode               | Flag    | Unmarshal on bad input         | Decoded `string`/`[]byte` | Portable            |
+|--------------------|---------|--------------------------------|---------------------------|---------------------|
+| **Fast** (default) | none    | may panic (trusted bytes)      | zero-copy (aliases input) | no (native memory)  |
+| **Safe**           | `-safe` | returns `codec.ErrShortBuffer` | copied (owns its bytes)   | yes (little-endian) |
 
 Fast mode is for trusted bytes on identical architectures: it uses `unsafe`
 zero-copy decoding and a single `memmove` for all-fixed-width structs. Safe mode
@@ -241,17 +241,48 @@ markers on the wire: the schema lives entirely in the generated code.
 This format is **not** self-describing and, in fast mode, **not** portable across
 architectures or Go versions. That is the deliberate trade for speed.
 
+## Compatibility
+
+goserde is pre-1.0: the API and wire format may change between minor versions
+until 1.0.0. From 1.0.0 onward the following semantic-versioning promise applies.
+
+**Covered by SemVer (stable within a major version):**
+
+- The generated method set on your types: `Size() int`, `Marshal([]byte) int`,
+  and `Unmarshal([]byte) (int, error)`.
+- The full `codec` package: the convenience API (`Bytes`, `Into`, `From`, and
+  the `Marshaler` / `Unmarshaler` interfaces) and the low-level encoding
+  primitives (`PutU32`/`U32` and friends, `PutUvarint`/`Uvarint`/`UvarintSize`,
+  `Zig`/`Zag`, `B2S`/`S2B`, the float bit-casts) you can use to hand-write a
+  codec instead of running the generator. Generated and hand-written codecs call
+  the same primitives, so they share an identical wire format.
+- The generator directives `//goserde:generate` and `//goserde:union`, and the
+  `goserde:"-"` struct tag.
+
+**Wire-format stability:**
+
+- **Safe mode** (`-safe`) is the portable format: little-endian and
+  bounds-checked, stable across architectures and Go versions. Use it for data
+  at rest or exchanged between machines.
+- **Fast mode** (default) is not portable. It uses native byte order and encodes
+  all-fixed-width structs as a copy of their in-memory layout, so the bytes can
+  differ across architectures and across Go versions whose struct layout
+  differs. Treat fast-mode bytes as ephemeral and decode them with the same
+  goserde version, architecture, and Go toolchain that produced them.
+
+Regenerating codecs after upgrading goserde is always safe and recommended.
+
 ## How it works
 
 The generator (`cmd/goserdegen`) is **standard-library only**: it loads and
 type-checks your package with `go/parser` and `go/types` (no `go/packages`, no
 network), finds `//goserde:generate` structs, and emits a codec shaped exactly
-like the hand-tuned reference in [`runtime/record.go`](runtime/record.go).
-Generated code imports goserde's `runtime` package, whose primitives (varint,
+like the hand-tuned reference in [`codec/record.go`](codec/record.go).
+Generated code imports goserde's `codec` package, whose primitives (varint,
 zigzag, little-endian fixed-width R/W, zero-copy conversions, float bit-casts)
 are written to inline.
 
-The import path of that `runtime` package is derived automatically from the
+The import path of that `codec` package is derived automatically from the
 module that built `goserdegen`, so forking under a different module path "just
 works" with no flags to keep in sync.
 

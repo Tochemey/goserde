@@ -10,10 +10,13 @@ build:
 test:
 	go test ./...
 
-# Coverage for the root module only. The separate benchcompare module is not
-# reached by ./... and is excluded from coverage by design.
+# Coverage for the library packages only: -coverpkg restricts the measured set to
+# codec and the generator. The example demo, the test/data fixtures, and the
+# separate benchcompare module are excluded.
+COVERPKG = ./codec/...,./cmd/goserdegen/...
+
 cover:
-	go test ./... -covermode=atomic -coverprofile=coverage.out
+	go test ./... -covermode=atomic -coverpkg=$(COVERPKG) -coverprofile=coverage.out
 	go tool cover -func=coverage.out | tail -1
 
 cover-html: cover
@@ -26,13 +29,13 @@ gen:
 vet:
 	go vet ./...
 
-# Benchmark goserde across the six diverse shapes.
+# Benchmark goserde across the diverse generated shapes.
 bench-shapes:
-	go test ./test/data/shapes/ -bench=. -benchmem -run='^$$'
+	go test ./cmd/goserdegen/ -bench=. -benchmem -run='^$$'
 
-# Benchmark the core runtime package (hand-tuned Record).
+# Benchmark the core codec package (hand-tuned Record).
 bench:
-	go test ./runtime/ -bench=. -benchmem -run='^$$'
+	go test ./codec/ -bench=. -benchmem -run='^$$'
 
 # Head-to-head vs mus and benc. Requires internet (separate module).
 compare:

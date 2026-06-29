@@ -131,6 +131,41 @@ type Tagged struct {
 	Name   string   // serialized
 }
 
+// Hue is a defined type with a uint8 underlying. As a slice or array element it
+// must not take the raw []byte copy path, since []byte is not assignable to
+// []Hue.
+type Hue uint8
+
+// Grade is a defined type with an int32 underlying, exercised as a scalar field
+// and as a slice element.
+type Grade int32
+
+// NamedScalars exercises named (defined) types whose underlying is a fixed-width
+// basic, used as slice and array elements. The leading string keeps the struct
+// off the blittable path, forcing the element-wise codecs that the raw byte
+// copy fast path would otherwise mis-handle.
+//
+//goserde:generate
+type NamedScalars struct {
+	Label   string  // length-prefixed bytes; forces a non-blittable struct
+	Palette []Hue   // named uint8 element: element-wise, not a []byte copy
+	Swatch  [4]Hue  // named uint8 array element: element-wise, not a bulk copy
+	Levels  []Grade // named int32 element
+	Accent  *Hue    // pointer to a named uint8
+}
+
+// NamedFixed is all-fixed-width even though its fields use defined types, so it
+// must still take the blittable memmove path; it guards that named byte and
+// integer elements round-trip through the raw copy.
+//
+//goserde:generate
+type NamedFixed struct {
+	Tag   Hue    // named uint8 scalar
+	Codes [3]Hue // named uint8 array
+	Score Grade  // named int32 scalar
+	Flag  bool   // single-byte flag
+}
+
 // Circle is a Geometry union member.
 //
 //goserde:generate

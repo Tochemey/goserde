@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package runtime
+package codec
 
 // Record is a representative payload: a mix of fixed-width numerics, a string,
 // a byte slice, and a slice of fixed-width values — the shape that exercises

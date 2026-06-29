@@ -23,7 +23,7 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test (race + coverage)
-        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+        run: go test -race -count=1 -covermode=atomic -coverpkg=./codec/...,./cmd/goserdegen/... -coverprofile=coverage.out ./...
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
         with:
@@ -45,9 +45,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: fuzz round-trip (fast)
-        run: go test ./test/data/shapes/ -run '^$' -fuzz '^FuzzRoundTrip$' -fuzztime 30s
+        run: go test ./cmd/goserdegen/ -run '^$' -fuzz '^FuzzRoundTrip$' -fuzztime 30s
       - name: fuzz decode (safe)
-        run: go test ./test/data/safeshapes/ -run '^$' -fuzz '^FuzzAllDecode$' -fuzztime 30s
+        run: go test ./cmd/goserdegen/ -run '^$' -fuzz '^FuzzAllDecode$' -fuzztime 30s
 
   lint:
     name: golangci-lint

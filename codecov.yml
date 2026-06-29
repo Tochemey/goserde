@@ -1,6 +1,15 @@
 # Codecov configuration.
 #
-# benchcompare is a separate, optional module holding the competitor benchmarks
-# (mus, benc). It is not part of the library and is excluded from coverage.
-ignore:
-  - "benchcompare"
+# Which code counts toward coverage is controlled by the -coverpkg flag in CI
+# (codec and the generator only); this file just enforces the gate. The project
+# requires the measured packages to stay fully covered, so both the overall
+# project and each pull request's changed lines must hit 100%.
+coverage:
+  status:
+    project:
+      default:
+        target: 100%
+        threshold: 0%
+    patch:
+      default:
+        target: 100%

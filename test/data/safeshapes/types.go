@@ -22,7 +22,7 @@
 
 // Package safeshapes holds types whose codecs are generated in SAFE mode
 // (goserdegen -safe), so Unmarshal is bounds-checked and returns
-// runtime.ErrShortBuffer on truncated input instead of panicking. Safe mode is
+// codec.ErrShortBuffer on truncated input instead of panicking. Safe mode is
 // also the portable mode: no memmove and copying (non-aliasing) decode. It
 // exists to exercise every safe-mode guard path; the types deliberately cover
 // fixed, variable-length, collection, pointer, and nested shapes.
