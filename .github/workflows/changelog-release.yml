@@ -1,0 +1,148 @@
+# Cut a GitHub release from the top entry of CHANGELOG.md.
+#
+# Flow: bump the version const in cmd/goserdegen/main.go, regenerate, add a
+# `## [vX.Y.Z] - YYYY-MM-DD` section to the top of CHANGELOG.md, and merge to
+# main. This workflow parses that entry, verifies it matches the generator
+# version and that generated code is current, then creates the tag and release.
+#
+# It is a no-op unless the top CHANGELOG section is a new, versioned, dated entry
+# whose tag does not already exist, so re-running or editing older entries is
+# safe. workflow_dispatch previews by default (dry_run=true).
+name: Changelog Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'CHANGELOG.md'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only; do not create the tag or release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: cut release from changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # need full history and tags for the guards and compare link
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Parse top changelog entry
+        id: parse
+        run: |
+          set -euo pipefail
+          header="$(awk '/^## / {print; exit}' CHANGELOG.md)"
+          echo "top header: $header"
+
+          re='^## \[(v[0-9]+\.[0-9]+\.[0-9]+)\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$'
+          if [[ ! "$header" =~ $re ]]; then
+            echo "Top section is not a versioned, dated release; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="${BASH_REMATCH[1]}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "Tag $version already exists; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Verify generator version matches the changelog
+        if: steps.parse.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          version="${{ steps.parse.outputs.version }}"
+          got="$(go run ./cmd/goserdegen -version)"
+          if [ "$got" != "$version" ]; then
+            echo "::error::CHANGELOG version $version != goserdegen version $got. Bump the version const in cmd/goserdegen/main.go and regenerate."
+            exit 1
+          fi
+
+      - name: Verify generated code is up to date
+        if: steps.parse.outputs.skip == 'false'
+        run: |
+          go generate ./...
+          git diff --exit-code
+
+      - name: Extract release notes
+        if: steps.parse.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Body of the top section: everything after the first `## ` header up to
+          # the next one, with link-reference definitions and leading/trailing
+          # blank lines trimmed. Single awk so it is portable (BSD and GNU).
+          awk '
+            /^## / { if (seen) exit; seen=1; next }
+            !seen { next }
+            /^\[.*\]: / { next }
+            { buf[++n] = $0 }
+            END {
+              s = 1
+              while (s <= n && buf[s] ~ /^[ \t]*$/) s++
+              while (n >= s && buf[n] ~ /^[ \t]*$/) n--
+              for (i = s; i <= n; i++) print buf[i]
+            }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::release notes for ${{ steps.parse.outputs.version }} are empty"
+            exit 1
+          fi
+
+          # Append GitHub's generated notes (the "What's Changed" merged-PR list,
+          # new contributors, and the Full Changelog link) for the commit range
+          # since the previous tag. generate-notes works before the tag exists by
+          # generating against the target commit; previous_tag_name is omitted for
+          # the first release so it spans from the beginning.
+          version="${{ steps.parse.outputs.version }}"
+          prev="$(git tag --sort=-v:refname | head -n1 || true)"
+          generated="$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$version" \
+            -f target_commitish="${{ github.sha }}" \
+            ${prev:+-f previous_tag_name="$prev"} \
+            --jq '.body')"
+
+          if [ -n "$generated" ]; then
+            printf '\n%s\n' "$generated" >> release-notes.md
+          fi
+
+          echo "----- release-notes.md -----"
+          cat release-notes.md
+
+      - name: Create release
+        if: steps.parse.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.parse.outputs.version }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN: would create release $version at ${{ github.sha }}."
+            exit 0
+          fi
+
+          gh release create "$version" \
+            --target "${{ github.sha }}" \
+            --title "$version" \
+            --notes-file release-notes.md \
+            --verify-tag=false
