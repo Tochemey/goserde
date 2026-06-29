@@ -7,10 +7,36 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  # Classify the diff. The heavy jobs below run only when code changed; on a
+  # docs-only change they are skipped, which still reports each check as passing
+  # so required status checks stay satisfied without running the full build.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - '.golangci.yml'
+              - 'codecov.yml'
+              - '.github/workflows/**'
+
   build-test:
     name: build & test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -37,6 +63,8 @@ jobs:
 
   fuzz-smoke:
     name: fuzz smoke
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -51,6 +79,8 @@ jobs:
 
   lint:
     name: golangci-lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

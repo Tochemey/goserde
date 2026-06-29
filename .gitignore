@@ -13,8 +13,8 @@
 coverage.txt
 coverage.html
 
-# Go fuzzing corpus generated locally (seed corpora live in testdata/fuzz and are committed)
-# Nothing to ignore here by default; failing-case corpus entries SHOULD be committed.
+# Go fuzzing: seed inputs are registered in code via f.Add; there is no corpus
+# directory to ignore. If the fuzzer ever writes a failing input, commit it.
 
 # Go workspace files
 go.work

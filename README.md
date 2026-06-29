@@ -24,7 +24,8 @@ Unmarshal  28 ns/op    1 alloc      (81× faster than encoding/json)
 smallest, fastest possible binary representation: RPC between your own services,
 on-disk caches, IPC, or embedded pipelines. The default **fast mode** assumes
 trusted input on the same architecture; an opt-in **safe mode** adds
-bounds-checked decoding and a portable, little-endian format (see [Modes](#modes)).
+bounds-checked decoding, copies of decoded data, and a portable little-endian
+format for untrusted or cross-machine input (see [Modes](#modes)).
 
 **Look elsewhere when** you need schema evolution, a self-describing format, or
 forward/backward compatibility with peers on different versions. goserde's schema
@@ -166,6 +167,16 @@ zero-copy decoding and a single `memmove` for all-fixed-width structs. Safe mode
 bounds-checks every read, copies length-prefixed payloads, and encodes
 field-by-field in little-endian, portable across architectures and Go versions,
 at a modest cost.
+
+**Decoding untrusted input? Use safe mode.** Fast mode trusts its bytes, and
+that has two consequences. First, malformed input may panic or read out of
+bounds, so never decode bytes you did not produce yourself (network payloads,
+files written by other processes, user input) in fast mode. Second, a decoded
+`string` or `[]byte` aliases the buffer passed to `Unmarshal` rather than
+copying, so that buffer must outlive the decoded value and must not be mutated
+or returned to a pool while the value is in use. Safe mode removes both hazards:
+it returns `codec.ErrShortBuffer` on truncated input and copies decoded data so
+the result owns its bytes.
 
 ```bash
 goserdegen -dir . -out goserde_gen.go        # fast (default)
