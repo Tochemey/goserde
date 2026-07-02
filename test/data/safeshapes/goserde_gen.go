@@ -41,7 +41,7 @@ func (r *All) Size() int {
 	s += (&r.Inner).Size()
 	s += 1
 	if r.Nested != nil {
-		s += (&(*r.Nested)).Size()
+		s += r.Nested.Size()
 	}
 	return s
 }
@@ -102,7 +102,7 @@ func (r *All) Marshal(b []byte) int {
 	if r.Nested != nil {
 		b[i] = 1
 		i++
-		i += (&(*r.Nested)).Marshal(b[i:])
+		i += r.Nested.Marshal(b[i:])
 	} else {
 		b[i] = 0
 		i++
@@ -274,13 +274,14 @@ func (r *All) Unmarshal(b []byte) (int, error) {
 	}
 	if b[i] != 0 {
 		i++
-		var j14 uint32
+		if r.Ptr == nil {
+			r.Ptr = new(uint32)
+		}
 		if len(b)-i < 4 {
 			return i, codec.ErrShortBuffer
 		}
-		j14 = uint32(codec.U32(b[i:]))
+		(*r.Ptr) = uint32(codec.U32(b[i:]))
 		i += 4
-		r.Ptr = &j14
 	} else {
 		i++
 		r.Ptr = nil
@@ -297,15 +298,16 @@ func (r *All) Unmarshal(b []byte) (int, error) {
 	}
 	if b[i] != 0 {
 		i++
-		var j15 Inner
+		if r.Nested == nil {
+			r.Nested = new(Inner)
+		}
 		{
-			nnn, err := (&j15).Unmarshal(b[i:])
+			nnn, err := r.Nested.Unmarshal(b[i:])
 			if err != nil {
 				return i, err
 			}
 			i += nnn
 		}
-		r.Nested = &j15
 	} else {
 		i++
 		r.Nested = nil
@@ -319,8 +321,8 @@ func (r *Arrays) Size() int {
 	s := 0
 	s += 16
 	s += 16
-	for j16 := 0; j16 < 2; j16++ {
-		s += codec.UvarintSize(uint64(len(r.Tags[j16]))) + len(r.Tags[j16])
+	for j14 := 0; j14 < 2; j14++ {
+		s += codec.UvarintSize(uint64(len(r.Tags[j14]))) + len(r.Tags[j14])
 	}
 	return s
 }
@@ -330,13 +332,13 @@ func (r *Arrays) Size() int {
 func (r *Arrays) Marshal(b []byte) int {
 	i := 0
 	i += copy(b[i:], r.Hash[:])
-	for j17 := 0; j17 < 4; j17++ {
-		codec.PutU32(b[i:], uint32(r.Quad[j17]))
+	for j15 := 0; j15 < 4; j15++ {
+		codec.PutU32(b[i:], uint32(r.Quad[j15]))
 		i += 4
 	}
-	for j18 := 0; j18 < 2; j18++ {
-		i += codec.PutUvarint(b[i:], uint64(len(r.Tags[j18])))
-		i += copy(b[i:], codec.S2B(r.Tags[j18]))
+	for j16 := 0; j16 < 2; j16++ {
+		i += codec.PutUvarint(b[i:], uint64(len(r.Tags[j16])))
+		i += copy(b[i:], codec.S2B(r.Tags[j16]))
 	}
 	_ = codec.PutU64
 	return i
@@ -355,14 +357,14 @@ func (r *Arrays) Unmarshal(b []byte) (int, error) {
 	}
 	copy(r.Hash[:], b[i:i+16])
 	i += 16
-	for j19 := 0; j19 < 4; j19++ {
+	for j17 := 0; j17 < 4; j17++ {
 		if len(b)-i < 4 {
 			return i, codec.ErrShortBuffer
 		}
-		r.Quad[j19] = int32(codec.U32(b[i:]))
+		r.Quad[j17] = int32(codec.U32(b[i:]))
 		i += 4
 	}
-	for j20 := 0; j20 < 2; j20++ {
+	for j18 := 0; j18 < 2; j18++ {
 		nn, cc = codec.Uvarint(b[i:])
 		if cc <= 0 {
 			return i, codec.ErrShortBuffer
@@ -371,7 +373,7 @@ func (r *Arrays) Unmarshal(b []byte) (int, error) {
 		if uint64(len(b)-i) < nn {
 			return i, codec.ErrShortBuffer
 		}
-		r.Tags[j20] = string(b[i : i+int(nn)])
+		r.Tags[j18] = string(b[i : i+int(nn)])
 		i += int(nn)
 	}
 	_ = codec.U64
@@ -489,21 +491,27 @@ func (r *Frame) Unmarshal(b []byte) (int, error) {
 	case 0:
 		r.Sig = nil
 	case 1:
-		var j21 Ping
-		nnn, err := (&j21).Unmarshal(b[i:])
+		j19, _ := r.Sig.(*Ping)
+		if j19 == nil {
+			j19 = new(Ping)
+		}
+		nnn, err := j19.Unmarshal(b[i:])
 		if err != nil {
 			return i, err
 		}
 		i += nnn
-		r.Sig = &j21
+		r.Sig = j19
 	case 2:
-		var j22 Pong
-		nnn, err := (&j22).Unmarshal(b[i:])
+		j20, _ := r.Sig.(*Pong)
+		if j20 == nil {
+			j20 = new(Pong)
+		}
+		nnn, err := j20.Unmarshal(b[i:])
 		if err != nil {
 			return i, err
 		}
 		i += nnn
-		r.Sig = &j22
+		r.Sig = j20
 	default:
 		return i, codec.ErrUnknownUnionTag
 	}

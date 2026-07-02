@@ -180,6 +180,29 @@ type NamedFixed struct {
 	Flag  bool   // single-byte flag
 }
 
+// WideItem is a wide, variable-size slice element: the string keeps it (and any
+// slice of it) off every bulk-copy path, and the fixed payload makes the cost
+// of copying an element by value visible in benchmarks.
+//
+//goserde:generate
+type WideItem struct {
+	ID   uint64   // fixed-width identifier
+	A    float64  // fixed-width payload
+	B    float64  // fixed-width payload
+	C    float64  // fixed-width payload
+	D    float64  // fixed-width payload
+	Blob [32]byte // fixed array, bulk-copied
+	Note string   // length-prefixed bytes; forces the element-wise loop
+}
+
+// WideList exercises marshalling a slice of wide, variable-size structs, the
+// shape where a value-copying `for _, e := range` loop is most expensive.
+//
+//goserde:generate
+type WideList struct {
+	Items []WideItem // length-prefixed slice of wide elements
+}
+
 // Circle is a Geometry union member.
 //
 //goserde:generate

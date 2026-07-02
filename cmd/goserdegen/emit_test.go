@@ -324,6 +324,62 @@ type T struct {
 	}
 }
 
+// TestGenerateBulkStructSlice checks that slices and arrays of a blittable
+// struct are bulk-copied in fast mode via unsafe.Sizeof (the generator cannot
+// know the padded element size), while non-blittable struct elements and safe
+// mode keep the per-element method loop.
+func TestGenerateBulkStructSlice(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type Blit struct {
+	X int32
+	Y int64
+	N int
+}
+
+//goserde:generate
+type Loose struct {
+	Name string
+}
+
+//goserde:generate
+type T struct {
+	Path []Blit
+	Quad [2]Blit
+	Rows []Loose
+}
+`
+	out := genFixture(t, src, false)
+
+	for _, want := range []string{
+		"s += int(unsafe.Sizeof(r.Path[0])) * len(r.Path)",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Path[0])), int(unsafe.Sizeof(r.Path[0]))*len(r.Path)))",
+		"s += int(unsafe.Sizeof(r.Quad))",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), int(unsafe.Sizeof(r.Quad))))",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fast mode missing struct bulk copy %q, got:\n%s", want, out)
+		}
+	}
+
+	// Decode fills the owned backing array with one copy in both shapes.
+	if !strings.Contains(out, "unsafe.Pointer(&r.Path[0])") || !strings.Contains(out, "int(nn)") {
+		t.Errorf("[]Blit decode must bulk-copy, got:\n%s", out)
+	}
+
+	// Non-blittable elements keep the per-element method loop.
+	if strings.Contains(out, "unsafe.Pointer(&r.Rows[0])") {
+		t.Errorf("[]Loose must not be bulk-copied, got:\n%s", out)
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not bulk-copy struct slices")
+	}
+}
+
 // TestGenerateExcludesTaggedField checks a goserde:"-" field never reaches the
 // wire, even when its type is otherwise unsupported.
 func TestGenerateExcludesTaggedField(t *testing.T) {
@@ -897,6 +953,13 @@ func TestAllShapes(t *testing.T) {
 	// always on the wire.
 	nb2 := shapes.NumericBulk{Quad: [4]uint32{9, 8, 7, 6}}
 	rt(t, nb2, nb2.Marshal, nb2.Size, func(o *shapes.NumericBulk, b []byte) { o.Unmarshal(b) })
+
+	wl := shapes.WideList{Items: []shapes.WideItem{
+		{ID: 1, A: 1.5, B: -2.5, C: 3.5, D: -4.5, Blob: [32]byte{1, 2, 3}, Note: "first"},
+		{ID: 2, Note: ""},
+		{ID: 3, A: 9, Blob: [32]byte{255}, Note: "third element with a longer note"},
+	}}
+	rt(t, wl, wl.Marshal, wl.Size, func(o *shapes.WideList, b []byte) { o.Unmarshal(b) })
 }
 
 // TestNamedTypeShapes covers defined types (named uint8/int32) used as slice and
@@ -1108,6 +1171,75 @@ func TestUnionRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(in, out) {
 			t.Fatalf("%s: round-trip mismatch:\n in=%+v\nout=%+v", in.Name, in, out)
 		}
+	}
+}
+
+// TestDecodeReusesPointees verifies that decoding into a value that already
+// holds a non-nil pointer (or a union member of the matching dynamic type)
+// overwrites the existing pointee in place instead of allocating a fresh one,
+// mirroring the slice and map reuse contract. It also checks the transitions:
+// wire nil clears the field, and a union tag of a different type replaces the
+// member.
+func TestDecodeReusesPointees(t *testing.T) {
+	in := shapes.Nested{Label: "n", Opt: &shapes.Inner{X: 1, Y: 2}}
+	buf := make([]byte, in.Size())
+	in.Marshal(buf)
+
+	out := shapes.Nested{Opt: &shapes.Inner{X: 9, Y: 9}}
+	kept := out.Opt
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if out.Opt != kept {
+		t.Fatalf("pointer decode allocated a new pointee instead of reusing the existing one")
+	}
+
+	if *out.Opt != (shapes.Inner{X: 1, Y: 2}) {
+		t.Fatalf("reused pointee holds %+v, want {X:1 Y:2}", *out.Opt)
+	}
+
+	nilIn := shapes.Nested{Label: "n"}
+	buf = buf[:nilIn.Size()]
+	nilIn.Marshal(buf)
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatalf("Unmarshal (nil flag): %v", err)
+	}
+
+	if out.Opt != nil {
+		t.Fatalf("wire nil must clear the pointer, got %+v", out.Opt)
+	}
+
+	d := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}}
+	dbuf := make([]byte, d.Size())
+	d.Marshal(dbuf)
+
+	dst := shapes.Drawing{Shape: &shapes.Circle{R: 9}}
+	keptShape := dst.Shape
+
+	if _, err := dst.Unmarshal(dbuf); err != nil {
+		t.Fatalf("union Unmarshal: %v", err)
+	}
+
+	if dst.Shape != keptShape {
+		t.Fatalf("union decode allocated a new member despite matching dynamic type")
+	}
+
+	if c := dst.Shape.(*shapes.Circle); c.R != 2.5 {
+		t.Fatalf("reused union member holds R=%v, want 2.5", c.R)
+	}
+
+	// A different incoming tag must replace the member, not reuse it.
+	dst.Shape = &shapes.Square{Side: 7}
+
+	if _, err := dst.Unmarshal(dbuf); err != nil {
+		t.Fatalf("union Unmarshal (type change): %v", err)
+	}
+
+	if c, ok := dst.Shape.(*shapes.Circle); !ok || c.R != 2.5 {
+		t.Fatalf("type change: got %T %+v, want *Circle{R:2.5}", dst.Shape, dst.Shape)
 	}
 }
 
@@ -1327,6 +1459,21 @@ func BenchmarkNested_U(b *testing.B) {
 	benchU(b, buf, func(x []byte) { var o shapes.Nested; o.Unmarshal(x) })
 }
 
+// BenchmarkNested_U_Reuse decodes repeatedly into the SAME destination,
+// exercising pointer-pointee reuse alongside the slice-of-struct backing-array
+// reuse. It should report 0 allocs, versus 2 for BenchmarkNested_U, which
+// decodes into a fresh value every iteration.
+func BenchmarkNested_U_Reuse(b *testing.B) {
+	in := shapes.Inner{X: 7, Y: 8}
+	v := shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &in, Path: []shapes.Inner{{X: 3, Y: 4}, {X: 5, Y: 6}, {X: 7, Y: 8}}}
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Nested
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
 func BenchmarkCollection_U(b *testing.B) {
 	v := shapes.CollectionHeavy{Counts: map[string]int64{"a": 1, "b": 2, "c": 3, "d": 4}, Floats: []float64{1, 2, 3, 4, 5}, Names: []string{"x", "y", "z"}}
 	buf := make([]byte, v.Size())
@@ -1345,6 +1492,47 @@ func BenchmarkCollection_U_Reuse(b *testing.B) {
 	var o shapes.CollectionHeavy
 
 	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkStructSlice1k round-trips a 1000-element slice of blittable structs,
+// the shape the fast-mode bulk copy turns into a single memmove each way.
+func BenchmarkStructSlice1k_M(b *testing.B) {
+	v := shapes.Nested{Label: "big", Path: make([]shapes.Inner, 1000)}
+
+	for i := range v.Path {
+		v.Path[i] = shapes.Inner{X: int32(i), Y: int32(-i)}
+	}
+
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkStructSlice1k_U(b *testing.B) {
+	v := shapes.Nested{Label: "big", Path: make([]shapes.Inner, 1000)}
+
+	for i := range v.Path {
+		v.Path[i] = shapes.Inner{X: int32(i), Y: int32(-i)}
+	}
+
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Nested
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkWideList_M measures marshalling a slice of wide, variable-size
+// structs, the shape where copying elements into a range value variable (the
+// pre-index-loop codegen) is most expensive.
+func BenchmarkWideList_M(b *testing.B) {
+	items := make([]shapes.WideItem, 16)
+
+	for i := range items {
+		items[i] = shapes.WideItem{ID: uint64(i), A: 1.5, B: 2.5, C: 3.5, D: 4.5, Blob: [32]byte{byte(i)}, Note: "note"}
+	}
+
+	v := shapes.WideList{Items: items}
+	benchM(b, v.Size, v.Marshal)
 }
 
 func BenchmarkStringHeavy_U(b *testing.B) {

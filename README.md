@@ -107,9 +107,9 @@ out.Unmarshal(data)        // returns (bytesRead int, err error)
 | Time       | `time.Time` (as int64 Unix-nanoseconds, UTC)                                 |
 | Unions     | interface fields via `//goserde:union` (see [Tagged unions](#tagged-unions)) |
 
-Fields tagged `` `goserde:"-"` `` are excluded from the wire and decode back to
-their zero value, useful for fields of types goserde cannot serialize
-(channels, funcs).
+Fields tagged `` `goserde:"-"` `` are excluded from the wire and are never
+written by decode: zero in a fresh destination, unchanged in a reused one.
+This is useful for fields of types goserde cannot serialize (channels, funcs).
 
 ```go
 //goserde:generate
@@ -164,7 +164,7 @@ so callers don't change.
 
 Fast mode is for trusted bytes on identical architectures: it uses `unsafe`
 zero-copy decoding and a single `memmove` for all-fixed-width structs and for
-slices and arrays of fixed-width elements. Safe mode
+slices and arrays of fixed-width elements or of those structs. Safe mode
 bounds-checks every read, copies length-prefixed payloads, and encodes
 field-by-field in little-endian, portable across architectures and Go versions,
 at a modest cost.
@@ -232,13 +232,19 @@ goserde's lead is shape-dependent. Marshal is zero-alloc on every shape:
 | Fixed-width (4 fld) | 2.4 ns  | 2.4 ns    | 0             | single memmove (blittable)     |
 | Flat + string/bytes | 7.1 ns  | 6.3 ns    | 0             | zero-copy `string`/`[]byte`    |
 | String-heavy        | 19.6 ns | 33.0 ns   | 1             | `[]string` must allocate       |
-| Nested + pointers   | 16.9 ns | 36.1 ns   | 2             | pointer + slice-of-struct      |
+| Nested + pointers   | 12.3 ns | 32.0 ns   | 2             | pointer + slice-of-struct      |
 | Map-heavy           | 78.7 ns | 149.8 ns  | 4             | `make(map)` + per-entry insert |
 
 **Decode reuse:** decoding repeatedly into the *same* value reuses its slices
-(by capacity) and maps (via `clear`). The map-heavy shape above drops from
+(by capacity), maps (via `clear`), pointer pointees, and union members whose
+dynamic type matches the incoming tag. The map-heavy shape above drops from
 **150 ns / 4 allocs to 63 ns / 0 allocs** when the destination is reused across
-calls, the right pattern for a read loop.
+calls, and the nested-pointer shape from **32 ns / 2 allocs to 10 ns /
+0 allocs**, the right pattern for a read loop. The trade: a reused destination
+is overwritten in place, so copy out anything you need to keep before decoding
+over it, and (as with `encoding/json`) its pointer fields and union members
+must not alias each other, since every aliased slot decodes through the one
+shared pointee.
 
 Fixed and flat structs are where goserde dominates. Map-heavy decode is its
 weakest point on a fresh destination, where mus and benc are competitive.
@@ -248,7 +254,8 @@ weakest point on a fresh destination, where mus and benc are competitive.
 Fixed-width little-endian numerics; LEB128 varint length prefixes for
 strings, slices, and maps; a 1-byte nil flag for pointers; an 8-byte
 Unix-nanosecond int64 for `time.Time`. In fast mode, all-fixed-width structs
-and slices/arrays of fixed-width elements are encoded as a single memory copy.
+and slices/arrays of fixed-width elements (or of all-fixed-width structs) are
+encoded as a single memory copy.
 There are no field names, tags, or type markers on the wire: the schema lives
 entirely in the generated code.
 
