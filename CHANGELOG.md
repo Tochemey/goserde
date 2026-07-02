@@ -2,6 +2,13 @@
 
 All notable changes to goserde are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Fast mode now bulk-copies slices and arrays of fixed-width elements.** Instead of an element loop, Marshal and Unmarshal emit a single raw-memory copy for slices and fixed arrays whose elements are explicitly sized basics (`bool`, `u/int8/16/32/64`, `float32/64`), named variants of those, or nested fixed arrays of the same. Decoding still fills an owned backing array (reused by capacity), so nothing new aliases the input buffer. `[]int` and `[]uint` keep the element-wise path because their in-memory width is platform-dependent, and `[]time.Time` keeps it because times encode as UnixNano. Safe mode is unaffected, and the fast-mode wire format is unchanged on little-endian architectures.
+- **Performance:** on the reference `Record` (Apple M1), marshal drops from ~14 ns to ~11 ns and unmarshal from ~28 ns to ~24 ns. The win grows with slice length: a 1000-element `[]uint32` encodes and decodes at memcpy speed (~60 ns). The hand-tuned reference codecs (`codec/record.go`, `benchcompare`) were updated to the same shape.
+
 ## [v0.1.0] - 2026-06-29
 
 First public release of goserde: a code-generated, zero-reflection binary serializer for Go, built for maximum encode/decode throughput when you own both ends of the wire.
@@ -49,4 +56,5 @@ goserde is **pre-1.0**: the API and wire format may change between minor version
 
 Requires Go 1.26.
 
+[Unreleased]: https://github.com/tochemey/goserde/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/tochemey/goserde/releases/tag/v0.1.0

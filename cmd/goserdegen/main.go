@@ -145,14 +145,15 @@ func run(args []string, stdout io.Writer) error {
 // generator holds the type-checked package and the resolved settings used while
 // emitting a codec file.
 type generator struct {
-	pkgName   string                          // name of the package being generated into
-	codecPkg  string                          // import path of the codec support package
-	codecQual string                          // package selector used in emitted code, e.g. "codec"
-	safe      bool                            // emit bounds-checked Unmarshal (returns ErrShortBuffer)
-	pkg       *types.Package                  // the package being generated into (for type qualifying)
-	usedTime  bool                            // set during emission when any field is time.Time
-	targets   []*types.Named                  // annotated structs to generate codecs for, sorted by name
-	unions    map[*types.Named][]*types.Named // union interface -> ordered concrete members
+	pkgName    string                          // name of the package being generated into
+	codecPkg   string                          // import path of the codec support package
+	codecQual  string                          // package selector used in emitted code, e.g. "codec"
+	safe       bool                            // emit bounds-checked Unmarshal (returns ErrShortBuffer)
+	pkg        *types.Package                  // the package being generated into (for type qualifying)
+	usedTime   bool                            // set during emission when any field is time.Time
+	usedUnsafe bool                            // set during emission when any codec takes a raw-memory copy path
+	targets    []*types.Named                  // annotated structs to generate codecs for, sorted by name
+	unions     map[*types.Named][]*types.Named // union interface -> ordered concrete members
 }
 
 // load parses and type-checks the package in dir using only the standard

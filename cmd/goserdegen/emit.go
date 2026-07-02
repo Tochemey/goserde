@@ -57,8 +57,6 @@ func emitf(b *bytes.Buffer, format string, args ...any) {
 func (g *generator) generate() ([]byte, error) {
 	var b bytes.Buffer
 
-	needsUnsafe := false
-
 	for _, t := range g.targets {
 		fs, err := g.fieldsOf(t)
 		if err != nil {
@@ -72,7 +70,7 @@ func (g *generator) generate() ([]byte, error) {
 			g.emitBlitSize(&b, t)
 			g.emitBlitMarshal(&b, t)
 			g.emitBlitUnmarshal(&b, t)
-			needsUnsafe = true
+			g.usedUnsafe = true
 			continue
 		}
 
@@ -90,14 +88,14 @@ func (g *generator) generate() ([]byte, error) {
 		emitf(out, "\t\"time\"\n")
 	}
 
-	if needsUnsafe {
+	if g.usedUnsafe {
 		emitf(out, "\t\"unsafe\"\n")
 	}
 
 	emitf(out, ")\n\n")
 	emitf(out, "var _ = %s.UvarintSize // keep import if unused\n\n", g.codecQual)
 
-	if needsUnsafe {
+	if g.usedUnsafe {
 		emitf(out, "var _ unsafe.Pointer\n\n")
 	}
 
@@ -368,6 +366,19 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 			return
 		}
 
+		if !g.safe && memCopyable(u.Elem()) {
+			// Fast mode: the elements' wire bytes equal the slice's backing
+			// memory, so one copy replaces the element loop (trusted bytes,
+			// same arch).
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s))\n", ref, byteCount(esz, fmt.Sprintf("len(%s)", ref)))
+			emitf(b, "\t}\n")
+
+			return
+		}
+
 		iv := freshVar()
 		emitf(b, "\tfor _, %s := range %s {\n", iv, ref)
 		g.marshalExpr(b, iv, u.Elem())
@@ -376,6 +387,15 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		// No length prefix; []byte-style bulk copy for byte arrays.
 		if isByteArray(u) {
 			emitf(b, "\ti += copy(b[i:], %s[:])\n", ref)
+			return
+		}
+
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			// Fast mode: fixed-width elements copy as one raw-memory block.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d))\n", ref, int(u.Len())*esz)
+
 			return
 		}
 
@@ -506,6 +526,20 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		// Reuse the destination's backing array when it already has the capacity,
 		// so repeated decodes into the same value stay allocation-free.
 		emitf(b, "\tif cap(%s) >= int(nn) {\n\t\t%s = %s[:nn]\n\t} else {\n\t\t%s = make(%s, nn)\n\t}\n", ref, ref, ref, ref, tn)
+
+		if !g.safe && memCopyable(u.Elem()) {
+			// Fast mode: fill the owned backing array with one copy instead of
+			// an element loop; a truncated buffer panics on the slice bound,
+			// matching the fast-mode contract.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			n := byteCount(esz, "int(nn)")
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s), b[i:i+%s])\n\ti += %s\n", ref, n, n, n)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
 		iv := freshIdx()
 		emitf(b, "\tfor %s := range %s {\n", iv, ref)
 		g.unmarshalExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
@@ -516,6 +550,16 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		if isByteArray(u) {
 			g.guardN(b, int(u.Len()))
 			emitf(b, "\tcopy(%s[:], b[i:i+%d])\n\ti += %d\n", ref, u.Len(), u.Len())
+			return
+		}
+
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			// Fast mode: fixed-width elements decode as one raw-memory block.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			total := int(u.Len()) * esz
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d), b[i:i+%d])\n\ti += %d\n", ref, total, total, total)
+
 			return
 		}
 
@@ -719,6 +763,43 @@ func freshVar() string { varCounter++; return fmt.Sprintf("e%d", varCounter) }
 
 // freshIdx returns a unique loop/temporary name (j1, j2, ...).
 func freshIdx() string { varCounter++; return fmt.Sprintf("j%d", varCounter) }
+
+// memCopyable reports whether t's fast-mode wire encoding is byte-identical to
+// its in-memory representation, so a slice or array of it can be bulk-copied
+// with a single memmove instead of an element loop. That holds for the
+// explicitly sized basics (bool, u/int8..64, float32/64) and arrays of them.
+// int and uint are excluded: they encode as 8 wire bytes but their in-memory
+// width is platform-dependent. time.Time is a struct encoded as UnixNano,
+// never raw memory.
+func memCopyable(t types.Type) bool {
+	if isTime(t) {
+		return false
+	}
+
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.Bool, types.Uint8, types.Int8, types.Uint16, types.Int16,
+			types.Uint32, types.Int32, types.Float32,
+			types.Uint64, types.Int64, types.Float64:
+			return true
+		}
+	case *types.Array:
+		return memCopyable(u.Elem())
+	}
+
+	return false
+}
+
+// byteCount returns the emitted expression for count elements of esz bytes,
+// folding away the multiplier for 1-byte elements.
+func byteCount(esz int, count string) string {
+	if esz == 1 {
+		return count
+	}
+
+	return fmt.Sprintf("%d*%s", esz, count)
+}
 
 // isFixedWidth reports whether t occupies a fixed number of raw memory bytes
 // that survive a same-arch memmove: a fixed-width basic, or an array (possibly

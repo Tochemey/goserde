@@ -62,14 +62,13 @@ func (r *CollectionHeavy) Marshal(b []byte) int {
 		i += 8
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Floats)))
-	for _, e6 := range r.Floats {
-		codec.PutU64(b[i:], codec.F64bits(e6))
-		i += 8
+	if len(r.Floats) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Floats[0])), 8*len(r.Floats)))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Names)))
-	for _, e7 := range r.Names {
-		i += codec.PutUvarint(b[i:], uint64(len(e7)))
-		i += copy(b[i:], codec.S2B(e7))
+	for _, e6 := range r.Names {
+		i += codec.PutUvarint(b[i:], uint64(len(e6)))
+		i += copy(b[i:], codec.S2B(e6))
 	}
 	_ = codec.PutU64
 	return i
@@ -88,22 +87,22 @@ func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
 	if nn == 0 {
 		r.Counts = nil
 	} else {
-		j8 := nn
+		j7 := nn
 		if r.Counts != nil {
 			clear(r.Counts)
 		} else {
-			r.Counts = make(map[string]int64, j8)
+			r.Counts = make(map[string]int64, j7)
 		}
-		for j9 := uint64(0); j9 < j8; j9++ {
-			var j10 string
-			var j11 int64
+		for j8 := uint64(0); j8 < j7; j8++ {
+			var j9 string
+			var j10 int64
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			j10 = codec.B2S(b[i : i+int(nn)])
+			j9 = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
-			j11 = int64(codec.U64(b[i:]))
+			j10 = int64(codec.U64(b[i:]))
 			i += 8
-			r.Counts[j10] = j11
+			r.Counts[j9] = j10
 		}
 	}
 	nn, cc = codec.Uvarint(b[i:])
@@ -116,10 +115,8 @@ func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Floats = make([]float64, nn)
 		}
-		for j12 := range r.Floats {
-			r.Floats[j12] = codec.Bitsf64(codec.U64(b[i:]))
-			i += 8
-		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Floats[0])), 8*int(nn)), b[i:i+8*int(nn)])
+		i += 8 * int(nn)
 	}
 	nn, cc = codec.Uvarint(b[i:])
 	i += cc
@@ -131,10 +128,10 @@ func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Names = make([]string, nn)
 		}
-		for j13 := range r.Names {
+		for j11 := range r.Names {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			r.Names[j13] = codec.B2S(b[i : i+int(nn)])
+			r.Names[j11] = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
 		}
 	}
@@ -157,8 +154,8 @@ func (r *Drawing) Size() int {
 		panic("goserde: value is not a registered member of union Geometry")
 	}
 	s += codec.UvarintSize(uint64(len(r.Layers)))
-	for _, e14 := range r.Layers {
-		switch v := e14.(type) {
+	for _, e12 := range r.Layers {
+		switch v := e12.(type) {
 		case *Circle:
 			s += 1 + v.Size()
 		case *Square:
@@ -191,8 +188,8 @@ func (r *Drawing) Marshal(b []byte) int {
 		panic("goserde: value is not a registered member of union Geometry")
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Layers)))
-	for _, e15 := range r.Layers {
-		switch v := e15.(type) {
+	for _, e13 := range r.Layers {
+		switch v := e13.(type) {
 		case *Circle:
 			i += codec.PutUvarint(b[i:], 1)
 			i += v.Marshal(b[i:])
@@ -227,15 +224,15 @@ func (r *Drawing) Unmarshal(b []byte) (int, error) {
 	case 0:
 		r.Shape = nil
 	case 1:
-		var j16 Circle
-		nnn, _ := (&j16).Unmarshal(b[i:])
+		var j14 Circle
+		nnn, _ := (&j14).Unmarshal(b[i:])
 		i += nnn
-		r.Shape = &j16
+		r.Shape = &j14
 	case 2:
-		var j17 Square
-		nnn, _ := (&j17).Unmarshal(b[i:])
+		var j15 Square
+		nnn, _ := (&j15).Unmarshal(b[i:])
 		i += nnn
-		r.Shape = &j17
+		r.Shape = &j15
 	default:
 		return i, codec.ErrUnknownUnionTag
 	}
@@ -249,22 +246,22 @@ func (r *Drawing) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Layers = make([]Geometry, nn)
 		}
-		for j18 := range r.Layers {
+		for j16 := range r.Layers {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
 			switch nn {
 			case 0:
-				r.Layers[j18] = nil
+				r.Layers[j16] = nil
 			case 1:
-				var j19 Circle
-				nnn, _ := (&j19).Unmarshal(b[i:])
+				var j17 Circle
+				nnn, _ := (&j17).Unmarshal(b[i:])
 				i += nnn
-				r.Layers[j18] = &j19
+				r.Layers[j16] = &j17
 			case 2:
-				var j20 Square
-				nnn, _ := (&j20).Unmarshal(b[i:])
+				var j18 Square
+				nnn, _ := (&j18).Unmarshal(b[i:])
 				i += nnn
-				r.Layers[j18] = &j20
+				r.Layers[j16] = &j18
 			default:
 				return i, codec.ErrUnknownUnionTag
 			}
@@ -371,11 +368,11 @@ func (r *Inner) Unmarshal(b []byte) (int, error) {
 func (r *MixedArrays) Size() int {
 	s := 0
 	s += codec.UvarintSize(uint64(len(r.Name))) + len(r.Name)
-	for j21 := 0; j21 < 3; j21++ {
-		s += codec.UvarintSize(uint64(len(r.Words[j21]))) + len(r.Words[j21])
+	for j19 := 0; j19 < 3; j19++ {
+		s += codec.UvarintSize(uint64(len(r.Words[j19]))) + len(r.Words[j19])
 	}
-	for j22 := 0; j22 < 2; j22++ {
-		s += (&r.Points[j22]).Size()
+	for j20 := 0; j20 < 2; j20++ {
+		s += (&r.Points[j20]).Size()
 	}
 	s += 8
 	return s
@@ -387,12 +384,12 @@ func (r *MixedArrays) Marshal(b []byte) int {
 	i := 0
 	i += codec.PutUvarint(b[i:], uint64(len(r.Name)))
 	i += copy(b[i:], codec.S2B(r.Name))
-	for j23 := 0; j23 < 3; j23++ {
-		i += codec.PutUvarint(b[i:], uint64(len(r.Words[j23])))
-		i += copy(b[i:], codec.S2B(r.Words[j23]))
+	for j21 := 0; j21 < 3; j21++ {
+		i += codec.PutUvarint(b[i:], uint64(len(r.Words[j21])))
+		i += copy(b[i:], codec.S2B(r.Words[j21]))
 	}
-	for j24 := 0; j24 < 2; j24++ {
-		i += (&r.Points[j24]).Marshal(b[i:])
+	for j22 := 0; j22 < 2; j22++ {
+		i += (&r.Points[j22]).Marshal(b[i:])
 	}
 	i += copy(b[i:], r.Bytes[:])
 	_ = codec.PutU64
@@ -411,15 +408,15 @@ func (r *MixedArrays) Unmarshal(b []byte) (int, error) {
 	i += cc
 	r.Name = codec.B2S(b[i : i+int(nn)])
 	i += int(nn)
-	for j25 := 0; j25 < 3; j25++ {
+	for j23 := 0; j23 < 3; j23++ {
 		nn, cc = codec.Uvarint(b[i:])
 		i += cc
-		r.Words[j25] = codec.B2S(b[i : i+int(nn)])
+		r.Words[j23] = codec.B2S(b[i : i+int(nn)])
 		i += int(nn)
 	}
-	for j26 := 0; j26 < 2; j26++ {
+	for j24 := 0; j24 < 2; j24++ {
 		{
-			nnn, _ := (&r.Points[j26]).Unmarshal(b[i:])
+			nnn, _ := (&r.Points[j24]).Unmarshal(b[i:])
 			i += nnn
 		}
 	}
@@ -471,18 +468,13 @@ func (r *NamedScalars) Marshal(b []byte) int {
 	i += codec.PutUvarint(b[i:], uint64(len(r.Label)))
 	i += copy(b[i:], codec.S2B(r.Label))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Palette)))
-	for _, e27 := range r.Palette {
-		b[i] = byte(e27)
-		i++
+	if len(r.Palette) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Palette[0])), len(r.Palette)))
 	}
-	for j28 := 0; j28 < 4; j28++ {
-		b[i] = byte(r.Swatch[j28])
-		i++
-	}
+	i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Swatch[0])), 4))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Levels)))
-	for _, e29 := range r.Levels {
-		codec.PutU32(b[i:], uint32(e29))
-		i += 4
+	if len(r.Levels) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Levels[0])), 4*len(r.Levels)))
 	}
 	if r.Accent != nil {
 		b[i] = 1
@@ -519,15 +511,11 @@ func (r *NamedScalars) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Palette = make([]Hue, nn)
 		}
-		for j30 := range r.Palette {
-			r.Palette[j30] = Hue(b[i])
-			i++
-		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Palette[0])), int(nn)), b[i:i+int(nn)])
+		i += int(nn)
 	}
-	for j31 := 0; j31 < 4; j31++ {
-		r.Swatch[j31] = Hue(b[i])
-		i++
-	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Swatch[0])), 4), b[i:i+4])
+	i += 4
 	nn, cc = codec.Uvarint(b[i:])
 	i += cc
 	if nn == 0 {
@@ -538,17 +526,15 @@ func (r *NamedScalars) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Levels = make([]Grade, nn)
 		}
-		for j32 := range r.Levels {
-			r.Levels[j32] = Grade(codec.U32(b[i:]))
-			i += 4
-		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Levels[0])), 4*int(nn)), b[i:i+4*int(nn)])
+		i += 4 * int(nn)
 	}
 	if b[i] != 0 {
 		i++
-		var j33 Hue
-		j33 = Hue(b[i])
+		var j25 Hue
+		j25 = Hue(b[i])
 		i++
-		r.Accent = &j33
+		r.Accent = &j25
 	} else {
 		i++
 		r.Accent = nil
@@ -567,8 +553,8 @@ func (r *Nested) Size() int {
 		s += (&(*r.Opt)).Size()
 	}
 	s += codec.UvarintSize(uint64(len(r.Path)))
-	for _, e34 := range r.Path {
-		s += (&e34).Size()
+	for _, e26 := range r.Path {
+		s += (&e26).Size()
 	}
 	return s
 }
@@ -589,8 +575,8 @@ func (r *Nested) Marshal(b []byte) int {
 		i++
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Path)))
-	for _, e35 := range r.Path {
-		i += (&e35).Marshal(b[i:])
+	for _, e27 := range r.Path {
+		i += (&e27).Marshal(b[i:])
 	}
 	_ = codec.PutU64
 	return i
@@ -614,12 +600,12 @@ func (r *Nested) Unmarshal(b []byte) (int, error) {
 	}
 	if b[i] != 0 {
 		i++
-		var j36 Inner
+		var j28 Inner
 		{
-			nnn, _ := (&j36).Unmarshal(b[i:])
+			nnn, _ := (&j28).Unmarshal(b[i:])
 			i += nnn
 		}
-		r.Opt = &j36
+		r.Opt = &j28
 	} else {
 		i++
 		r.Opt = nil
@@ -634,11 +620,108 @@ func (r *Nested) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Path = make([]Inner, nn)
 		}
-		for j37 := range r.Path {
+		for j29 := range r.Path {
 			{
-				nnn, _ := (&r.Path[j37]).Unmarshal(b[i:])
+				nnn, _ := (&r.Path[j29]).Unmarshal(b[i:])
 				i += nnn
 			}
+		}
+	}
+	_ = codec.U64
+	return i, nil
+}
+
+// Size returns the exact number of bytes Marshal will write for the receiver.
+func (r *NumericBulk) Size() int {
+	s := 0
+	s += codec.UvarintSize(uint64(len(r.Label))) + len(r.Label)
+	s += codec.UvarintSize(uint64(len(r.U16s)))
+	s += 2 * len(r.U16s)
+	s += codec.UvarintSize(uint64(len(r.F64s)))
+	s += 8 * len(r.F64s)
+	s += 16
+	s += codec.UvarintSize(uint64(len(r.Ints)))
+	s += 8 * len(r.Ints)
+	return s
+}
+
+// Marshal encodes the receiver into b, which must be at least Size() bytes,
+// and returns the number of bytes written.
+func (r *NumericBulk) Marshal(b []byte) int {
+	i := 0
+	i += codec.PutUvarint(b[i:], uint64(len(r.Label)))
+	i += copy(b[i:], codec.S2B(r.Label))
+	i += codec.PutUvarint(b[i:], uint64(len(r.U16s)))
+	if len(r.U16s) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.U16s[0])), 2*len(r.U16s)))
+	}
+	i += codec.PutUvarint(b[i:], uint64(len(r.F64s)))
+	if len(r.F64s) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.F64s[0])), 8*len(r.F64s)))
+	}
+	i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16))
+	i += codec.PutUvarint(b[i:], uint64(len(r.Ints)))
+	for _, e30 := range r.Ints {
+		codec.PutU64(b[i:], uint64(e30))
+		i += 8
+	}
+	_ = codec.PutU64
+	return i
+}
+
+// Unmarshal decodes the receiver from b and returns the number of bytes consumed.
+// The returned error is always nil; truncated input may panic (fast mode).
+func (r *NumericBulk) Unmarshal(b []byte) (int, error) {
+	i := 0
+	var nn uint64
+	var cc int
+	_ = nn
+	_ = cc
+	nn, cc = codec.Uvarint(b[i:])
+	i += cc
+	r.Label = codec.B2S(b[i : i+int(nn)])
+	i += int(nn)
+	nn, cc = codec.Uvarint(b[i:])
+	i += cc
+	if nn == 0 {
+		r.U16s = nil
+	} else {
+		if cap(r.U16s) >= int(nn) {
+			r.U16s = r.U16s[:nn]
+		} else {
+			r.U16s = make([]uint16, nn)
+		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.U16s[0])), 2*int(nn)), b[i:i+2*int(nn)])
+		i += 2 * int(nn)
+	}
+	nn, cc = codec.Uvarint(b[i:])
+	i += cc
+	if nn == 0 {
+		r.F64s = nil
+	} else {
+		if cap(r.F64s) >= int(nn) {
+			r.F64s = r.F64s[:nn]
+		} else {
+			r.F64s = make([]float64, nn)
+		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.F64s[0])), 8*int(nn)), b[i:i+8*int(nn)])
+		i += 8 * int(nn)
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16), b[i:i+16])
+	i += 16
+	nn, cc = codec.Uvarint(b[i:])
+	i += cc
+	if nn == 0 {
+		r.Ints = nil
+	} else {
+		if cap(r.Ints) >= int(nn) {
+			r.Ints = r.Ints[:nn]
+		} else {
+			r.Ints = make([]int, nn)
+		}
+		for j31 := range r.Ints {
+			r.Ints[j31] = int(codec.U64(b[i:]))
+			i += 8
 		}
 	}
 	_ = codec.U64
@@ -689,8 +772,8 @@ func (r *StringHeavy) Size() int {
 	s += codec.UvarintSize(uint64(len(r.Title))) + len(r.Title)
 	s += codec.UvarintSize(uint64(len(r.Body))) + len(r.Body)
 	s += codec.UvarintSize(uint64(len(r.Tags)))
-	for _, e38 := range r.Tags {
-		s += codec.UvarintSize(uint64(len(e38))) + len(e38)
+	for _, e32 := range r.Tags {
+		s += codec.UvarintSize(uint64(len(e32))) + len(e32)
 	}
 	return s
 }
@@ -704,9 +787,9 @@ func (r *StringHeavy) Marshal(b []byte) int {
 	i += codec.PutUvarint(b[i:], uint64(len(r.Body)))
 	i += copy(b[i:], codec.S2B(r.Body))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Tags)))
-	for _, e39 := range r.Tags {
-		i += codec.PutUvarint(b[i:], uint64(len(e39)))
-		i += copy(b[i:], codec.S2B(e39))
+	for _, e33 := range r.Tags {
+		i += codec.PutUvarint(b[i:], uint64(len(e33)))
+		i += copy(b[i:], codec.S2B(e33))
 	}
 	_ = codec.PutU64
 	return i
@@ -738,10 +821,10 @@ func (r *StringHeavy) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Tags = make([]string, nn)
 		}
-		for j40 := range r.Tags {
+		for j34 := range r.Tags {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			r.Tags[j40] = codec.B2S(b[i : i+int(nn)])
+			r.Tags[j34] = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
 		}
 	}
@@ -819,8 +902,8 @@ func (r *TimeStruct) Marshal(b []byte) int {
 		i++
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Stamps)))
-	for _, e41 := range r.Stamps {
-		codec.PutU64(b[i:], uint64(e41.UnixNano()))
+	for _, e35 := range r.Stamps {
+		codec.PutU64(b[i:], uint64(e35.UnixNano()))
 		i += 8
 	}
 	_ = codec.PutU64
@@ -843,10 +926,10 @@ func (r *TimeStruct) Unmarshal(b []byte) (int, error) {
 	i += 8
 	if b[i] != 0 {
 		i++
-		var j42 time.Time
-		j42 = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
+		var j36 time.Time
+		j36 = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
 		i += 8
-		r.Updated = &j42
+		r.Updated = &j36
 	} else {
 		i++
 		r.Updated = nil
@@ -861,8 +944,8 @@ func (r *TimeStruct) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Stamps = make([]time.Time, nn)
 		}
-		for j43 := range r.Stamps {
-			r.Stamps[j43] = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
+		for j37 := range r.Stamps {
+			r.Stamps[j37] = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
 			i += 8
 		}
 	}

@@ -14,8 +14,8 @@ language, and no runtime type registry: just straight-line Go over a single
 running offset, with inlinable primitives and zero-copy decoding.
 
 ```
-Marshal    14 ns/op    0 allocs     (28× faster than encoding/json)
-Unmarshal  28 ns/op    1 alloc      (81× faster than encoding/json)
+Marshal    11 ns/op    0 allocs     (37× faster than encoding/json)
+Unmarshal  24 ns/op    1 alloc      (96× faster than encoding/json)
 ```
 
 ## Is goSerde for you?
@@ -163,7 +163,8 @@ so callers don't change.
 | **Safe**           | `-safe` | returns `codec.ErrShortBuffer` | copied (owns its bytes)   | yes (little-endian) |
 
 Fast mode is for trusted bytes on identical architectures: it uses `unsafe`
-zero-copy decoding and a single `memmove` for all-fixed-width structs. Safe mode
+zero-copy decoding and a single `memmove` for all-fixed-width structs and for
+slices and arrays of fixed-width elements. Safe mode
 bounds-checks every read, copies length-prefixed payloads, and encodes
 field-by-field in little-endian, portable across architectures and Go versions,
 at a modest cost.
@@ -196,11 +197,11 @@ Flat `Record` struct (`uint64`, `float64`, `bool`, `string`, `[]uint32`,
 
 | Operation | goserde            | encoding/json      | encoding/gob¹ |
 |-----------|--------------------|--------------------|---------------|
-| Marshal   | **14 ns**, 0 alloc | 399 ns, 1 alloc    | 191 ns        |
-| Unmarshal | **28 ns**, 1 alloc | 2258 ns, 12 allocs | n/a           |
+| Marshal   | **11 ns**, 0 alloc | 400 ns, 1 alloc    | 190 ns        |
+| Unmarshal | **24 ns**, 1 alloc | 2264 ns, 12 allocs | n/a           |
 
-¹ gob marshal uses a reused encoder. goserde is ~28× faster than JSON on
-marshal and ~81× on unmarshal, with a fraction of the allocations.
+¹ gob marshal uses a reused encoder. goserde is ~37× faster than JSON on
+marshal and ~96× on unmarshal, with a fraction of the allocations.
 
 ### vs other fast serializers
 
@@ -209,17 +210,18 @@ v0.10.2 and [benc](https://github.com/deneonet/benc) v1.1.8:
 
 | Serializer   | Marshal     | Unmarshal   | Payload | Decode allocs |
 |--------------|-------------|-------------|---------|---------------|
-| **goserde**  | **13.3 ns** | **28.0 ns** | 139 B   | **1**         |
-| benc         | 25.3 ns     | 45.1 ns     | 143 B   | 1             |
-| mus (raw)    | 34.3 ns     | 68.6 ns     | 139 B   | 2             |
-| mus (varint) | 34.2 ns     | 73.0 ns     | 109 B   | 2             |
+| **goserde**  | **10.6 ns** | **23.3 ns** | 139 B   | **1**         |
+| benc         | 25.3 ns     | 43.9 ns     | 143 B   | 1             |
+| mus (raw)    | 33.9 ns     | 68.7 ns     | 139 B   | 2             |
+| mus (varint) | 33.7 ns     | 74.5 ns     | 109 B   | 2             |
 
-goserde is ~1.9× / ~1.6× faster than benc (marshal/unmarshal) and ~2.6× faster
-than mus on both. The main reason is **no interface dispatch in the generated
-code**: running mus in fixed-width "raw" mode produces goserde's exact 139 B
-format yet barely changes its speed, so the win is the straight-line code, not
-the format. mus and benc are fuller-featured libraries (schema evolution,
-validation, versioning); goserde trades those for raw throughput.
+goserde is ~2.4× / ~1.9× faster than benc (marshal/unmarshal) and ~3× faster
+than mus on both. The main reasons are **no interface dispatch in the generated
+code** and **single-memmove encoding of fixed-width slices**: running mus in
+fixed-width "raw" mode produces goserde's exact 139 B format yet barely changes
+its speed, so the win is the straight-line code, not the format. mus and benc
+are fuller-featured libraries (schema evolution, validation, versioning);
+goserde trades those for raw throughput.
 
 ### Across struct shapes
 
@@ -231,11 +233,11 @@ goserde's lead is shape-dependent. Marshal is zero-alloc on every shape:
 | Flat + string/bytes | 7.1 ns  | 6.3 ns    | 0             | zero-copy `string`/`[]byte`    |
 | String-heavy        | 19.6 ns | 33.0 ns   | 1             | `[]string` must allocate       |
 | Nested + pointers   | 16.9 ns | 36.1 ns   | 2             | pointer + slice-of-struct      |
-| Map-heavy           | 77.5 ns | 151.9 ns  | 4             | `make(map)` + per-entry insert |
+| Map-heavy           | 78.7 ns | 149.8 ns  | 4             | `make(map)` + per-entry insert |
 
 **Decode reuse:** decoding repeatedly into the *same* value reuses its slices
 (by capacity) and maps (via `clear`). The map-heavy shape above drops from
-**152 ns / 4 allocs to 67 ns / 0 allocs** when the destination is reused across
+**150 ns / 4 allocs to 63 ns / 0 allocs** when the destination is reused across
 calls, the right pattern for a read loop.
 
 Fixed and flat structs are where goserde dominates. Map-heavy decode is its
@@ -245,9 +247,10 @@ weakest point on a fresh destination, where mus and benc are competitive.
 
 Fixed-width little-endian numerics; LEB128 varint length prefixes for
 strings, slices, and maps; a 1-byte nil flag for pointers; an 8-byte
-Unix-nanosecond int64 for `time.Time`. All-fixed-width structs are encoded as a
-single memory copy in fast mode. There are no field names, tags, or type
-markers on the wire: the schema lives entirely in the generated code.
+Unix-nanosecond int64 for `time.Time`. In fast mode, all-fixed-width structs
+and slices/arrays of fixed-width elements are encoded as a single memory copy.
+There are no field names, tags, or type markers on the wire: the schema lives
+entirely in the generated code.
 
 This format is **not** self-describing and, in fast mode, **not** portable across
 architectures or Go versions. That is the deliberate trade for speed.

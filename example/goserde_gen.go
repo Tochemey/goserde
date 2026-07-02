@@ -73,9 +73,8 @@ func (r *User) Marshal(b []byte) int {
 		i += copy(b[i:], codec.S2B(e2))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Scores)))
-	for _, e3 := range r.Scores {
-		codec.PutU32(b[i:], uint32(e3))
-		i += 4
+	if len(r.Scores) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Scores[0])), 4*len(r.Scores)))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Avatar)))
 	i += copy(b[i:], r.Avatar)
@@ -113,10 +112,10 @@ func (r *User) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Nicks = make([]string, nn)
 		}
-		for j4 := range r.Nicks {
+		for j3 := range r.Nicks {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			r.Nicks[j4] = codec.B2S(b[i : i+int(nn)])
+			r.Nicks[j3] = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
 		}
 	}
@@ -130,10 +129,8 @@ func (r *User) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Scores = make([]int32, nn)
 		}
-		for j5 := range r.Scores {
-			r.Scores[j5] = int32(codec.U32(b[i:]))
-			i += 4
-		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Scores[0])), 4*int(nn)), b[i:i+4*int(nn)])
+		i += 4 * int(nn)
 	}
 	nn, cc = codec.Uvarint(b[i:])
 	i += cc

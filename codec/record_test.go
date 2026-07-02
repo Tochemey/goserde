@@ -98,6 +98,33 @@ func TestRecordVariants(t *testing.T) {
 	}
 }
 
+// TestRecordDecodeReuse decodes twice into the same value: the second decode
+// must reuse the Tags backing array (the capacity path) and still round-trip.
+func TestRecordDecodeReuse(t *testing.T) {
+	in := sample()
+	buf := make([]byte, in.Size())
+	in.Marshal(buf)
+
+	var out Record
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	first := &out.Tags[0]
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if &out.Tags[0] != first {
+		t.Error("second decode should reuse the Tags backing array")
+	}
+
+	if !reflect.DeepEqual(in, &out) {
+		t.Fatalf("reuse round-trip mismatch:\n in=%+v\nout=%+v", in, &out)
+	}
+}
+
 // BenchmarkGoserdeMarshal measures Marshal into a reused buffer, the intended
 // hot-path usage.
 func BenchmarkGoserdeMarshal(b *testing.B) {

@@ -131,6 +131,20 @@ type Tagged struct {
 	Name   string   // serialized
 }
 
+// NumericBulk mixes a string (keeping the struct off the blittable path) with
+// slices and an array of fixed-width numerics, the shapes that take the
+// fast-mode bulk-copy codec. Ints stays element-wise: int is always 8 bytes on
+// the wire, but its in-memory width is platform-dependent.
+//
+//goserde:generate
+type NumericBulk struct {
+	Label string    // length-prefixed bytes; forces a non-blittable struct
+	U16s  []uint16  // bulk-copied in fast mode
+	F64s  []float64 // bulk-copied in fast mode
+	Quad  [4]uint32 // fixed array of fixed-width elements, bulk-copied in fast mode
+	Ints  []int     // element-wise; in-memory width varies by platform
+}
+
 // Hue is a defined type with a uint8 underlying. As a slice or array element it
 // must not take the raw []byte copy path, since []byte is not assignable to
 // []Hue.
@@ -142,14 +156,14 @@ type Grade int32
 
 // NamedScalars exercises named (defined) types whose underlying is a fixed-width
 // basic, used as slice and array elements. The leading string keeps the struct
-// off the blittable path, forcing the element-wise codecs that the raw byte
-// copy fast path would otherwise mis-handle.
+// off the blittable path; named elements must never take the raw []byte alias
+// path, which would not type-check.
 //
 //goserde:generate
 type NamedScalars struct {
 	Label   string  // length-prefixed bytes; forces a non-blittable struct
-	Palette []Hue   // named uint8 element: element-wise, not a []byte copy
-	Swatch  [4]Hue  // named uint8 array element: element-wise, not a bulk copy
+	Palette []Hue   // named uint8 element: copied, never a []byte alias
+	Swatch  [4]Hue  // named uint8 array element: copied, never a []byte alias
 	Levels  []Grade // named int32 element
 	Accent  *Hue    // pointer to a named uint8
 }

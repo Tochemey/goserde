@@ -225,8 +225,10 @@ type Holder struct {
 }
 
 // TestGenerateNamedByteElement checks that a slice/array whose element is a
-// defined byte type takes the element-wise path, not the raw []byte copy that
-// would not type-check (regression for the named-element bug).
+// defined byte type never takes the raw []byte alias path that would not
+// type-check (regression for the named-element bug): fast mode decodes into an
+// owned backing array via the unsafe bulk copy, and safe mode stays
+// element-wise with no unsafe.
 func TestGenerateNamedByteElement(t *testing.T) {
 	src := `package fixture
 
@@ -242,16 +244,83 @@ type T struct {
 	out := genFixture(t, src, false)
 
 	if !strings.Contains(out, "make([]Hue,") {
-		t.Errorf("expected element-wise slice decode (make([]Hue, ...)), got:\n%s", out)
+		t.Errorf("expected an owned slice decode (make([]Hue, ...)), got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "Hue(b[i])") {
-		t.Errorf("expected per-element Hue conversion, got:\n%s", out)
+	if !strings.Contains(out, "unsafe.Slice((*byte)(unsafe.Pointer(&r.Pal[0]))") {
+		t.Errorf("expected the fast-mode bulk copy for the named-byte slice, got:\n%s", out)
 	}
 
 	// The broken fast path aliased the buffer straight into the field.
 	if strings.Contains(out, "r.Pal = b[i") {
 		t.Error("named-byte slice must not alias the input buffer as []byte")
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if !strings.Contains(safeOut, "Hue(b[i])") {
+		t.Errorf("expected per-element Hue conversion in safe mode, got:\n%s", safeOut)
+	}
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not use unsafe for named-byte elements")
+	}
+}
+
+// TestGenerateBulkFixedSlice checks that fast mode encodes and decodes slices
+// and arrays of fixed-width elements as a single raw-memory copy, while int
+// elements (whose in-memory width is platform-dependent) and time.Time elements
+// (encoded as UnixNano, not raw memory) keep the element loop.
+func TestGenerateBulkFixedSlice(t *testing.T) {
+	src := `package fixture
+
+import "time"
+
+//goserde:generate
+type T struct {
+	Label string
+	U16s  []uint16
+	F64s  []float64
+	Quad  [4]int32
+	Grid  [][4]uint32
+	Ints  []int
+	Ts    []time.Time
+}
+`
+	out := genFixture(t, src, false)
+
+	for _, want := range []string{
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.U16s[0])), 2*len(r.U16s)))",
+		"copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.F64s[0])), 8*int(nn)), b[i:i+8*int(nn)])",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16))",
+		"copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16), b[i:i+16])",
+		// [][4]uint32: the array element is itself raw-memory copyable, so the
+		// outer slice bulk-copies 16 bytes per element.
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Grid[0])), 16*len(r.Grid)))",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fast mode missing bulk copy %q, got:\n%s", want, out)
+		}
+	}
+
+	// []int stays element-wise so its wire width is 8 bytes on every platform.
+	if !strings.Contains(out, "make([]int, nn)") {
+		t.Errorf("[]int must keep the element-wise path, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "unsafe.Pointer(&r.Ints[0])") {
+		t.Errorf("[]int must not be bulk-copied (platform-dependent width), got:\n%s", out)
+	}
+
+	// []time.Time stays element-wise: it encodes as UnixNano, not raw memory.
+	if strings.Contains(out, "unsafe.Pointer(&r.Ts[0])") {
+		t.Errorf("[]time.Time must not be bulk-copied, got:\n%s", out)
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not bulk-copy fixed-width slices")
 	}
 }
 
@@ -814,6 +883,20 @@ func TestAllShapes(t *testing.T) {
 
 	sh := shapes.StringHeavy{Title: "T", Body: "lorem ipsum dolor", Tags: []string{"go", "fast"}}
 	rt(t, sh, sh.Marshal, sh.Size, func(o *shapes.StringHeavy, b []byte) { o.Unmarshal(b) })
+
+	nb := shapes.NumericBulk{
+		Label: "bulk",
+		U16s:  []uint16{1, 65535, 42},
+		F64s:  []float64{-1.5, 0, 3.25},
+		Quad:  [4]uint32{1, 2, 3, 4},
+		Ints:  []int{-9, 0, 1 << 40},
+	}
+	rt(t, nb, nb.Marshal, nb.Size, func(o *shapes.NumericBulk, b []byte) { o.Unmarshal(b) })
+
+	// Nil slices skip the bulk copy and decode back to nil; the fixed array is
+	// always on the wire.
+	nb2 := shapes.NumericBulk{Quad: [4]uint32{9, 8, 7, 6}}
+	rt(t, nb2, nb2.Marshal, nb2.Size, func(o *shapes.NumericBulk, b []byte) { o.Unmarshal(b) })
 }
 
 // TestNamedTypeShapes covers defined types (named uint8/int32) used as slice and
