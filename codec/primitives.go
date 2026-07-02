@@ -40,6 +40,7 @@ package codec
 
 import (
 	"errors"
+	"math/bits"
 	"unsafe"
 )
 
@@ -125,7 +126,9 @@ func U64(b []byte) uint64 {
 
 // PutUvarint writes v as an unsigned LEB128 varint at b[0:] and returns the
 // number of bytes written. Varints encode length prefixes and small integers
-// compactly; the caller must ensure b has room for UvarintSize(v) bytes.
+// compactly; the caller must ensure b has room for UvarintSize(v) bytes. The
+// single-byte case (v below 0x80) exits on the first iteration, and the whole
+// function inlines at call sites.
 func PutUvarint(b []byte, v uint64) int {
 	i := 0
 	for v >= 0x80 {
@@ -138,7 +141,9 @@ func PutUvarint(b []byte, v uint64) int {
 }
 
 // Uvarint reads an unsigned varint from b, returning the value and bytes read.
-// A non-positive count signals an error (overflow or truncation).
+// A non-positive count signals an error (overflow or truncation). The
+// single-byte case (the overwhelmingly common one for length prefixes) returns
+// on the first iteration, and the whole function inlines at call sites.
 func Uvarint(b []byte) (uint64, int) {
 	var x uint64
 	var s uint
@@ -156,14 +161,11 @@ func Uvarint(b []byte) (uint64, int) {
 	return 0, 0 // truncated
 }
 
-// UvarintSize returns the number of bytes PutUvarint would write for v.
+// UvarintSize returns the number of bytes PutUvarint would write for v. It is
+// branch-free: a varint spends 7 significant bits per byte, so the size is
+// ceil(bits/7), with v=0 still occupying one byte via the |1.
 func UvarintSize(v uint64) int {
-	n := 1
-	for v >= 0x80 {
-		v >>= 7
-		n++
-	}
-	return n
+	return (bits.Len64(v|1) + 6) / 7
 }
 
 // Zig zigzag-encodes a signed integer so that small-magnitude values (positive
