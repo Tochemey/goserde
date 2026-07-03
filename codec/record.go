@@ -22,6 +22,8 @@
 
 package codec
 
+import "unsafe"
+
 // Record is a representative payload: a mix of fixed-width numerics, a string,
 // a byte slice, and a slice of fixed-width values — the shape that exercises
 // every primitive. The hand-written codec below is the exact shape the
@@ -65,14 +67,41 @@ func (r *Record) Marshal(b []byte) int {
 
 	i += PutUvarint(b[i:], uint64(len(r.Tags)))
 
-	for _, t := range r.Tags {
-		PutU32(b[i:], t)
-		i += 4
+	// Fixed-width elements: their wire bytes equal the slice's backing memory,
+	// so one copy replaces the element loop (trusted bytes, same arch).
+	if len(r.Tags) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*len(r.Tags)))
 	}
 
 	i += PutUvarint(b[i:], uint64(len(r.Blob)))
 	i += copy(b[i:], r.Blob)
 	return i
+}
+
+// Append appends the record's encoding to b, growing it as needed, and returns
+// the extended slice. It writes the same bytes as Marshal in a single tree
+// walk, with no Size pass.
+func (r *Record) Append(b []byte) []byte {
+	b = AppendU64(b, r.ID)
+	b = AppendU64(b, f64bits(r.Score))
+
+	if r.Active {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+
+	b = AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	b = AppendUvarint(b, uint64(len(r.Tags)))
+
+	if len(r.Tags) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*len(r.Tags))...)
+	}
+
+	b = AppendUvarint(b, uint64(len(r.Blob)))
+	b = append(b, r.Blob...)
+	return b
 }
 
 // Unmarshal reads the record back from b in the same order Marshal wrote it and
@@ -92,11 +121,20 @@ func (r *Record) Unmarshal(b []byte) (int, error) {
 
 	n, c = Uvarint(b[i:])
 	i += c
-	r.Tags = make([]uint32, n)
 
-	for j := range r.Tags {
-		r.Tags[j] = U32(b[i:])
-		i += 4
+	// Fixed-width elements: reuse the destination's backing array when it has
+	// the capacity, then fill it with one copy instead of an element loop.
+	if n == 0 {
+		r.Tags = nil
+	} else {
+		if cap(r.Tags) >= int(n) {
+			r.Tags = r.Tags[:n]
+		} else {
+			r.Tags = make([]uint32, n)
+		}
+
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*int(n)), b[i:i+4*int(n)])
+		i += 4 * int(n)
 	}
 
 	n, c = Uvarint(b[i:])

@@ -91,3 +91,43 @@ jobs:
       - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
+
+  # Report-only benchmark smoke: runs the shape benchmarks on the PR base and
+  # head and prints a benchstat comparison in the job log. It never fails the
+  # build (shared runners are too noisy for a hard gate); it exists so a perf
+  # regression is visible in review rather than discovered after merge.
+  bench-smoke:
+    name: benchmark smoke (report-only)
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+      # Generated code is committed and its freshness is enforced by
+      # build-test, so each ref benchmarks its own checked-in codecs.
+      - name: bench base
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          go test ./cmd/goserdegen/ -run '^$' -bench . -benchmem -count=6 | tee /tmp/bench-base.txt
+      - name: bench head
+        run: |
+          git checkout ${{ github.event.pull_request.head.sha }}
+          go test ./cmd/goserdegen/ -run '^$' -bench . -benchmem -count=6 | tee /tmp/bench-head.txt
+      - name: benchstat report
+        run: |
+          benchstat /tmp/bench-base.txt /tmp/bench-head.txt | tee /tmp/benchstat.txt
+          {
+            echo '### Benchmark comparison (base vs head, report-only)'
+            echo '```'
+            cat /tmp/benchstat.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -23,13 +23,18 @@
 package codec
 
 // Marshaler is implemented by every generated codec. Size reports the exact
-// number of bytes Marshal will write, letting callers size a buffer once.
+// number of bytes Marshal will write, letting callers size a buffer once;
+// Append encodes the same bytes without needing that pass.
 type Marshaler interface {
 	// Size returns the exact encoded length in bytes.
 	Size() int
 	// Marshal encodes the value into b, which must be at least Size() bytes, and
 	// returns the number of bytes written.
 	Marshal(b []byte) int
+	// Append appends the value's encoding to b, growing it as needed, and
+	// returns the extended slice. It writes the same bytes as Marshal in a
+	// single tree walk, with no Size pass.
+	Append(b []byte) []byte
 }
 
 // Unmarshaler is implemented by every generated codec.
@@ -50,19 +55,11 @@ func Bytes(m Marshaler) []byte {
 }
 
 // Into encodes m into buf, reusing buf when its capacity is sufficient and
-// allocating a new buffer otherwise, and returns the slice holding the encoded
-// bytes. Reusing a buffer across calls keeps Marshal allocation-free.
+// growing it otherwise, and returns the slice holding the encoded bytes.
+// It encodes in a single tree walk via Append, with no Size pass; reusing a
+// buffer across calls keeps it allocation-free.
 func Into(m Marshaler, buf []byte) []byte {
-	n := m.Size()
-	if cap(buf) < n {
-		buf = make([]byte, n)
-	} else {
-		buf = buf[:n]
-	}
-
-	m.Marshal(buf)
-
-	return buf
+	return m.Append(buf[:0])
 }
 
 // From decodes b into u and returns only the error, discarding the consumed-byte

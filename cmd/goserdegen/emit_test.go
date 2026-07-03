@@ -75,7 +75,7 @@ func genFixtureErr(t *testing.T, src string, safe bool) (string, error) {
 		t.Fatal(err)
 	}
 
-	g, err := load(dir, testCodecPkg, safe)
+	g, err := load(dir, "goserde_gen.go", testCodecPkg, safe)
 	if err != nil {
 		return "", err
 	}
@@ -160,6 +160,126 @@ type Fixed struct {
 	}
 }
 
+// TestAppendMatchesMarshal checks the single-pass Append method against the
+// two-pass Size+Marshal on every shape, in both modes: identical bytes, and an
+// existing prefix is preserved rather than overwritten.
+func TestAppendMatchesMarshal(t *testing.T) {
+	accent := shapes.Hue(200)
+	now := time.Unix(0, 1719858000000000000).UTC()
+
+	// Byte-for-byte comparison needs deterministic output, so maps are pinned
+	// to a single entry: iteration order would legitimately differ between the
+	// Marshal and Append walks.
+	all := sampleAll()
+	all.Scores = map[string]int32{"x": 1}
+
+	for _, m := range []codec.Marshaler{
+		&shapes.SmallFixed{A: -5, B: 99, C: 2.71828, D: true},
+		&shapes.FlatMixed{ID: 1 << 40, Ratio: 0.5, Name: "flat", Data: []byte("xyz")},
+		&shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &shapes.Inner{X: 7, Y: 8}, Path: []shapes.Inner{{X: 3, Y: 4}}},
+		&shapes.Nested{Label: "nil"},
+		&shapes.CollectionHeavy{Counts: map[string]int64{"a": 1}, Floats: []float64{1.5}, Names: []string{"x", "y"}},
+		&shapes.StringHeavy{Title: "T", Body: "lorem ipsum", Tags: []string{"go", "fast"}},
+		&shapes.TimeStruct{Label: "t", Created: now, Updated: &now, Stamps: []time.Time{now, now.Add(time.Hour)}},
+		&shapes.FixedArrays{Hash: [16]byte{1, 2, 3}, Quad: [4]int32{9, -8, 7, -6}, Flag: true},
+		&shapes.MixedArrays{Name: "m", Words: [3]string{"a", "bb", "ccc"}, Points: [2]shapes.Inner{{X: 1, Y: 2}, {X: 3, Y: 4}}, Bytes: [8]byte{5}},
+		&shapes.NumericBulk{Label: "bulk", U16s: []uint16{1, 65535}, F64s: []float64{-1.5}, Quad: [4]uint32{1, 2, 3, 4}, Ints: []int{-9, 1 << 40}},
+		&shapes.NamedScalars{Label: "named", Palette: []shapes.Hue{1, 2}, Swatch: [4]shapes.Hue{9, 8, 7, 6}, Levels: []shapes.Grade{-1, 5}, Accent: &accent},
+		&shapes.NamedFixed{Tag: 3, Codes: [3]shapes.Hue{1, 2, 3}, Score: -42, Flag: true},
+		&shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}},
+		&shapes.Drawing{Name: "nil"},
+		&shapes.WideList{Items: []shapes.WideItem{{ID: 1, A: 1.5, Blob: [32]byte{9}, Note: "w"}}},
+		&shapes.Tagged{ID: 7, Name: "kept"},
+		all, // safe mode: every safeshapes type in one value
+	} {
+		want := codec.Bytes(m)
+
+		got := m.Append(nil)
+		if !bytes.Equal(got, want) {
+			t.Errorf("%T: Append bytes differ from Marshal:\n append=%x\nmarshal=%x", m, got, want)
+		}
+
+		prefix := []byte{0xAA, 0xBB, 0xCC}
+		got = m.Append(prefix)
+
+		if !bytes.Equal(got[:3], prefix) {
+			t.Errorf("%T: Append overwrote the existing prefix", m)
+		}
+
+		if !bytes.Equal(got[3:], want) {
+			t.Errorf("%T: Append after prefix differs from Marshal", m)
+		}
+	}
+}
+
+// TestGenerateTimeNotBlittable checks that a time.Time field keeps an
+// otherwise fixed-width struct off the whole-struct memmove: time encodes as
+// UnixNano, not raw memory, so the struct must use the field-by-field codec.
+func TestGenerateTimeNotBlittable(t *testing.T) {
+	src := `package fixture
+
+import "time"
+
+//goserde:generate
+type Timed struct {
+	A int64
+	T time.Time
+}
+`
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "unsafe.Sizeof(*r)") {
+		t.Errorf("struct with a time.Time field must not take the blit path, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "UnixNano") {
+		t.Errorf("time.Time field must encode as UnixNano, got:\n%s", out)
+	}
+}
+
+// TestGenerateBlitRequiresFullCoverage checks that a struct with a skipped
+// field (goserde:"-" or unexported) never takes the whole-struct memmove, even
+// when every serialized field is fixed-width: the blit would copy the skipped
+// field's bytes onto the wire and overwrite it on decode. Such structs, and
+// slices of them, must use the field-by-field codec.
+func TestGenerateBlitRequiresFullCoverage(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type Tagged struct {
+	A int64
+	B int64 ` + "`goserde:\"-\"`" + `
+}
+
+//goserde:generate
+type Hidden struct {
+	A int64
+	b int64
+}
+
+//goserde:generate
+type T struct {
+	Ts []Tagged
+	Hs []Hidden
+}
+`
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "unsafe.Sizeof(*r)") {
+		t.Errorf("structs with skipped fields must not take the whole-struct blit, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "r.B") {
+		t.Errorf("excluded field must never reach the wire, got:\n%s", out)
+	}
+
+	for _, sl := range []string{"r.Ts", "r.Hs"} {
+		if strings.Contains(out, "unsafe.Pointer(&"+sl+"[0])") {
+			t.Errorf("slice of partially-covered struct %s must not be bulk-copied, got:\n%s", sl, out)
+		}
+	}
+}
+
 // TestGenerateSafeMode checks safe mode emits bounds checks, copies length-
 // prefixed payloads, and avoids the unsafe memmove path.
 func TestGenerateSafeMode(t *testing.T) {
@@ -225,8 +345,10 @@ type Holder struct {
 }
 
 // TestGenerateNamedByteElement checks that a slice/array whose element is a
-// defined byte type takes the element-wise path, not the raw []byte copy that
-// would not type-check (regression for the named-element bug).
+// defined byte type never takes the raw []byte alias path that would not
+// type-check (regression for the named-element bug): fast mode decodes into an
+// owned backing array via the unsafe bulk copy, and safe mode stays
+// element-wise with no unsafe.
 func TestGenerateNamedByteElement(t *testing.T) {
 	src := `package fixture
 
@@ -242,16 +364,139 @@ type T struct {
 	out := genFixture(t, src, false)
 
 	if !strings.Contains(out, "make([]Hue,") {
-		t.Errorf("expected element-wise slice decode (make([]Hue, ...)), got:\n%s", out)
+		t.Errorf("expected an owned slice decode (make([]Hue, ...)), got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "Hue(b[i])") {
-		t.Errorf("expected per-element Hue conversion, got:\n%s", out)
+	if !strings.Contains(out, "unsafe.Slice((*byte)(unsafe.Pointer(&r.Pal[0]))") {
+		t.Errorf("expected the fast-mode bulk copy for the named-byte slice, got:\n%s", out)
 	}
 
 	// The broken fast path aliased the buffer straight into the field.
 	if strings.Contains(out, "r.Pal = b[i") {
 		t.Error("named-byte slice must not alias the input buffer as []byte")
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if !strings.Contains(safeOut, "Hue(b[i])") {
+		t.Errorf("expected per-element Hue conversion in safe mode, got:\n%s", safeOut)
+	}
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not use unsafe for named-byte elements")
+	}
+}
+
+// TestGenerateBulkFixedSlice checks that fast mode encodes and decodes slices
+// and arrays of fixed-width elements as a single raw-memory copy, while int
+// elements (whose in-memory width is platform-dependent) and time.Time elements
+// (encoded as UnixNano, not raw memory) keep the element loop.
+func TestGenerateBulkFixedSlice(t *testing.T) {
+	src := `package fixture
+
+import "time"
+
+//goserde:generate
+type T struct {
+	Label string
+	U16s  []uint16
+	F64s  []float64
+	Quad  [4]int32
+	Grid  [][4]uint32
+	Ints  []int
+	Ts    []time.Time
+}
+`
+	out := genFixture(t, src, false)
+
+	for _, want := range []string{
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.U16s[0])), 2*len(r.U16s)))",
+		"copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.F64s[0])), 8*int(nn)), b[i:i+8*int(nn)])",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16))",
+		"copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16), b[i:i+16])",
+		// [][4]uint32: the array element is itself raw-memory copyable, so the
+		// outer slice bulk-copies 16 bytes per element.
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Grid[0])), 16*len(r.Grid)))",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fast mode missing bulk copy %q, got:\n%s", want, out)
+		}
+	}
+
+	// []int stays element-wise so its wire width is 8 bytes on every platform.
+	if !strings.Contains(out, "make([]int, nn)") {
+		t.Errorf("[]int must keep the element-wise path, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "unsafe.Pointer(&r.Ints[0])") {
+		t.Errorf("[]int must not be bulk-copied (platform-dependent width), got:\n%s", out)
+	}
+
+	// []time.Time stays element-wise: it encodes as UnixNano, not raw memory.
+	if strings.Contains(out, "unsafe.Pointer(&r.Ts[0])") {
+		t.Errorf("[]time.Time must not be bulk-copied, got:\n%s", out)
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not bulk-copy fixed-width slices")
+	}
+}
+
+// TestGenerateBulkStructSlice checks that slices and arrays of a blittable
+// struct are bulk-copied in fast mode via unsafe.Sizeof (the generator cannot
+// know the padded element size), while non-blittable struct elements and safe
+// mode keep the per-element method loop.
+func TestGenerateBulkStructSlice(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type Blit struct {
+	X int32
+	Y int64
+	N int
+}
+
+//goserde:generate
+type Loose struct {
+	Name string
+}
+
+//goserde:generate
+type T struct {
+	Path []Blit
+	Quad [2]Blit
+	Rows []Loose
+}
+`
+	out := genFixture(t, src, false)
+
+	for _, want := range []string{
+		"s += int(unsafe.Sizeof(r.Path[0])) * len(r.Path)",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Path[0])), int(unsafe.Sizeof(r.Path[0]))*len(r.Path)))",
+		"s += int(unsafe.Sizeof(r.Quad))",
+		"i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), int(unsafe.Sizeof(r.Quad))))",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fast mode missing struct bulk copy %q, got:\n%s", want, out)
+		}
+	}
+
+	// Decode fills the owned backing array with one copy in both shapes.
+	if !strings.Contains(out, "unsafe.Pointer(&r.Path[0])") || !strings.Contains(out, "int(nn)") {
+		t.Errorf("[]Blit decode must bulk-copy, got:\n%s", out)
+	}
+
+	// Non-blittable elements keep the per-element method loop.
+	if strings.Contains(out, "unsafe.Pointer(&r.Rows[0])") {
+		t.Errorf("[]Loose must not be bulk-copied, got:\n%s", out)
+	}
+
+	safeOut := genFixture(t, src, true)
+
+	if strings.Contains(safeOut, "unsafe") {
+		t.Error("safe mode must not bulk-copy struct slices")
 	}
 }
 
@@ -369,7 +614,7 @@ func TestLoadErrors(t *testing.T) {
 
 // TestLoadEmptyDir checks an empty directory is reported rather than panicking.
 func TestLoadEmptyDir(t *testing.T) {
-	if _, err := load(t.TempDir(), testCodecPkg, false); err == nil {
+	if _, err := load(t.TempDir(), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Fatal("expected an error for a directory with no Go package")
 	}
 }
@@ -436,7 +681,7 @@ func writePkg(t *testing.T, src string) string {
 func loadGen(t *testing.T, src string, safe bool) *generator {
 	t.Helper()
 
-	g, err := load(writePkg(t, src), testCodecPkg, safe)
+	g, err := load(writePkg(t, src), "goserde_gen.go", testCodecPkg, safe)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -465,6 +710,117 @@ func checkPkg(t *testing.T, src string) (*generator, *types.Scope) {
 	}
 
 	return &generator{pkgName: f.Name.Name, pkg: pkg}, pkg.Scope()
+}
+
+// TestValidateOut checks the -out constraints: a bare non-test .go file name,
+// since the methods must land in the structs' own package and be visible to
+// ordinary builds.
+func TestValidateOut(t *testing.T) {
+	for _, ok := range []string{"goserde_gen.go", "custom_codecs.go", "zz_generated.go"} {
+		if err := validateOut(ok); err != nil {
+			t.Errorf("validateOut(%q) = %v, want nil", ok, err)
+		}
+	}
+
+	for _, bad := range []string{"", "sub/gen.go", "../gen.go", "/tmp/gen.go", "gen.txt", ".go", "gen_test.go"} {
+		if err := validateOut(bad); err == nil {
+			t.Errorf("validateOut(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+// TestLoadIgnoresStaleOutFile checks that the previous generated file, under
+// any -out name, is never parsed: a stale or broken one must not break
+// regeneration.
+func TestLoadIgnoresStaleOutFile(t *testing.T) {
+	dir := writePkg(t, "package fixture\n//goserde:generate\ntype T struct{ X int32 }\n")
+
+	if err := os.WriteFile(filepath.Join(dir, "custom_gen.go"), []byte("package broken !!!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := load(dir, "custom_gen.go", testCodecPkg, false); err != nil {
+		t.Errorf("stale out file must be ignored, got: %v", err)
+	}
+
+	// The same file breaks the load when it is NOT the out file, proving the
+	// exclusion is what saved it.
+	if _, err := load(dir, "goserde_gen.go", testCodecPkg, false); err == nil {
+		t.Error("expected a parse error when the broken file is not the out file")
+	}
+}
+
+// ownedMethods is a hand-written full codec method set for a type named T,
+// used to simulate a user adopting the generated methods into their own file.
+const ownedMethods = `
+func (t *T) Size() int { return 4 }
+func (t *T) Marshal(b []byte) int { return 4 }
+func (t *T) Append(b []byte) []byte { return b }
+func (t *T) Unmarshal(b []byte) (int, error) { return 4, nil }
+`
+
+// TestGenerateSkipsUserOwnedCodec checks that a target declaring the full
+// codec method set by hand is skipped: no duplicate methods are emitted, the
+// type remains usable as a nested field, and slices of it are never
+// bulk-copied (the hand-written codec is a black box).
+func TestGenerateSkipsUserOwnedCodec(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type T struct {
+	X int32
+}
+
+//goserde:generate
+type U struct {
+	F  T
+	FS []T
+}
+` + ownedMethods
+
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "func (r *T)") {
+		t.Errorf("user-owned T must not be regenerated, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "func (r *U) Marshal") {
+		t.Errorf("U must still be generated, got:\n%s", out)
+	}
+
+	// U delegates to T's hand-written methods and must not bulk-copy []T even
+	// though T's fields look blittable.
+	if !strings.Contains(out, "(&r.F).Marshal(b[i:])") {
+		t.Errorf("nested user-owned field must delegate to its methods, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "unsafe.Pointer(&r.FS[0])") {
+		t.Errorf("slice of a user-owned type must not be bulk-copied, got:\n%s", out)
+	}
+}
+
+// TestGeneratePartialCodecOwnershipError checks that declaring only part of
+// the codec method set is rejected with an error naming the methods found.
+func TestGeneratePartialCodecOwnershipError(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type T struct {
+	X int32
+}
+
+func (t *T) Size() int { return 4 }
+func (t *T) Marshal(b []byte) int { return 4 }
+`
+
+	_, err := genFixtureErr(t, src, false)
+	if err == nil {
+		t.Fatal("expected an error for partial codec ownership")
+	}
+
+	if !strings.Contains(err.Error(), "Marshal, Size") || !strings.Contains(err.Error(), "full codec method set") {
+		t.Errorf("error should name the declared methods, got: %v", err)
+	}
 }
 
 // TestRun exercises the run entry point across its success and failure paths.
@@ -499,6 +855,29 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("bad out name", func(t *testing.T) {
+		if err := run([]string{"goserdegen", "-dir", writePkg(t, valid), "-out", "sub/gen.go"}, io.Discard); err == nil {
+			t.Error("expected an error for a path-like -out")
+		}
+	})
+
+	t.Run("user-owned notice", func(t *testing.T) {
+		dir := writePkg(t, valid+ownedMethods)
+
+		var out bytes.Buffer
+		if err := run([]string{"goserdegen", "-dir", dir, "-out", "gen.go"}, &out); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+
+		if !strings.Contains(out.String(), "skipping T: codec methods are user-owned") {
+			t.Errorf("expected the user-owned notice, got %q", out.String())
+		}
+
+		if !strings.Contains(out.String(), "(0 types)") {
+			t.Errorf("expected zero emitted types, got %q", out.String())
+		}
+	})
+
 	t.Run("bad flag", func(t *testing.T) {
 		if err := run([]string{"goserdegen", "-nope"}, io.Discard); err == nil {
 			t.Error("expected an error for an unknown flag")
@@ -514,9 +893,14 @@ func TestRun(t *testing.T) {
 	t.Run("write error", func(t *testing.T) {
 		dir := writePkg(t, valid)
 
-		// -out into a nonexistent subdirectory makes WriteFile fail.
-		if err := run([]string{"goserdegen", "-dir", dir, "-out", "nope/gen.go"}, io.Discard); err == nil {
-			t.Error("expected an error writing into a missing subdirectory")
+		// A directory occupying the out name makes WriteFile fail (a path-like
+		// -out no longer reaches the write; validateOut rejects it first).
+		if err := os.Mkdir(filepath.Join(dir, "gen.go"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := run([]string{"goserdegen", "-dir", dir, "-out", "gen.go"}, io.Discard); err == nil {
+			t.Error("expected an error writing over a directory")
 		}
 	})
 
@@ -631,7 +1015,7 @@ func TestLoadSkipsNonSourceFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := load(dir, testCodecPkg, false)
+	g, err := load(dir, "goserde_gen.go", testCodecPkg, false)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -643,7 +1027,7 @@ func TestLoadSkipsNonSourceFiles(t *testing.T) {
 
 // TestLoadParseError checks a syntactically invalid source file is reported.
 func TestLoadParseError(t *testing.T) {
-	if _, err := load(writePkg(t, "package f\nfunc {\n"), testCodecPkg, false); err == nil {
+	if _, err := load(writePkg(t, "package f\nfunc {\n"), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Error("expected a parse error")
 	}
 }
@@ -651,7 +1035,7 @@ func TestLoadParseError(t *testing.T) {
 // TestLoadTypeCheckError checks a file that parses but fails type-checking is
 // reported with the type-check prefix.
 func TestLoadTypeCheckError(t *testing.T) {
-	_, err := load(writePkg(t, "package f\n//goserde:generate\ntype T struct{ X Undefined }\n"), testCodecPkg, false)
+	_, err := load(writePkg(t, "package f\n//goserde:generate\ntype T struct{ X Undefined }\n"), "goserde_gen.go", testCodecPkg, false)
 	if err == nil || !strings.Contains(err.Error(), "type-check") {
 		t.Fatalf("got err=%v, want a type-check error", err)
 	}
@@ -659,7 +1043,7 @@ func TestLoadTypeCheckError(t *testing.T) {
 
 // TestLoadMissingDir checks a nonexistent directory is reported (ReadDir error).
 func TestLoadMissingDir(t *testing.T) {
-	if _, err := load(filepath.Join(t.TempDir(), "missing"), testCodecPkg, false); err == nil {
+	if _, err := load(filepath.Join(t.TempDir(), "missing"), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Error("expected an error for a missing directory")
 	}
 }
@@ -814,6 +1198,27 @@ func TestAllShapes(t *testing.T) {
 
 	sh := shapes.StringHeavy{Title: "T", Body: "lorem ipsum dolor", Tags: []string{"go", "fast"}}
 	rt(t, sh, sh.Marshal, sh.Size, func(o *shapes.StringHeavy, b []byte) { o.Unmarshal(b) })
+
+	nb := shapes.NumericBulk{
+		Label: "bulk",
+		U16s:  []uint16{1, 65535, 42},
+		F64s:  []float64{-1.5, 0, 3.25},
+		Quad:  [4]uint32{1, 2, 3, 4},
+		Ints:  []int{-9, 0, 1 << 40},
+	}
+	rt(t, nb, nb.Marshal, nb.Size, func(o *shapes.NumericBulk, b []byte) { o.Unmarshal(b) })
+
+	// Nil slices skip the bulk copy and decode back to nil; the fixed array is
+	// always on the wire.
+	nb2 := shapes.NumericBulk{Quad: [4]uint32{9, 8, 7, 6}}
+	rt(t, nb2, nb2.Marshal, nb2.Size, func(o *shapes.NumericBulk, b []byte) { o.Unmarshal(b) })
+
+	wl := shapes.WideList{Items: []shapes.WideItem{
+		{ID: 1, A: 1.5, B: -2.5, C: 3.5, D: -4.5, Blob: [32]byte{1, 2, 3}, Note: "first"},
+		{ID: 2, Note: ""},
+		{ID: 3, A: 9, Blob: [32]byte{255}, Note: "third element with a longer note"},
+	}}
+	rt(t, wl, wl.Marshal, wl.Size, func(o *shapes.WideList, b []byte) { o.Unmarshal(b) })
 }
 
 // TestNamedTypeShapes covers defined types (named uint8/int32) used as slice and
@@ -1025,6 +1430,75 @@ func TestUnionRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(in, out) {
 			t.Fatalf("%s: round-trip mismatch:\n in=%+v\nout=%+v", in.Name, in, out)
 		}
+	}
+}
+
+// TestDecodeReusesPointees verifies that decoding into a value that already
+// holds a non-nil pointer (or a union member of the matching dynamic type)
+// overwrites the existing pointee in place instead of allocating a fresh one,
+// mirroring the slice and map reuse contract. It also checks the transitions:
+// wire nil clears the field, and a union tag of a different type replaces the
+// member.
+func TestDecodeReusesPointees(t *testing.T) {
+	in := shapes.Nested{Label: "n", Opt: &shapes.Inner{X: 1, Y: 2}}
+	buf := make([]byte, in.Size())
+	in.Marshal(buf)
+
+	out := shapes.Nested{Opt: &shapes.Inner{X: 9, Y: 9}}
+	kept := out.Opt
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if out.Opt != kept {
+		t.Fatalf("pointer decode allocated a new pointee instead of reusing the existing one")
+	}
+
+	if *out.Opt != (shapes.Inner{X: 1, Y: 2}) {
+		t.Fatalf("reused pointee holds %+v, want {X:1 Y:2}", *out.Opt)
+	}
+
+	nilIn := shapes.Nested{Label: "n"}
+	buf = buf[:nilIn.Size()]
+	nilIn.Marshal(buf)
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatalf("Unmarshal (nil flag): %v", err)
+	}
+
+	if out.Opt != nil {
+		t.Fatalf("wire nil must clear the pointer, got %+v", out.Opt)
+	}
+
+	d := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}}
+	dbuf := make([]byte, d.Size())
+	d.Marshal(dbuf)
+
+	dst := shapes.Drawing{Shape: &shapes.Circle{R: 9}}
+	keptShape := dst.Shape
+
+	if _, err := dst.Unmarshal(dbuf); err != nil {
+		t.Fatalf("union Unmarshal: %v", err)
+	}
+
+	if dst.Shape != keptShape {
+		t.Fatalf("union decode allocated a new member despite matching dynamic type")
+	}
+
+	if c := dst.Shape.(*shapes.Circle); c.R != 2.5 {
+		t.Fatalf("reused union member holds R=%v, want 2.5", c.R)
+	}
+
+	// A different incoming tag must replace the member, not reuse it.
+	dst.Shape = &shapes.Square{Side: 7}
+
+	if _, err := dst.Unmarshal(dbuf); err != nil {
+		t.Fatalf("union Unmarshal (type change): %v", err)
+	}
+
+	if c, ok := dst.Shape.(*shapes.Circle); !ok || c.R != 2.5 {
+		t.Fatalf("type change: got %T %+v, want *Circle{R:2.5}", dst.Shape, dst.Shape)
 	}
 }
 
@@ -1244,6 +1718,21 @@ func BenchmarkNested_U(b *testing.B) {
 	benchU(b, buf, func(x []byte) { var o shapes.Nested; o.Unmarshal(x) })
 }
 
+// BenchmarkNested_U_Reuse decodes repeatedly into the SAME destination,
+// exercising pointer-pointee reuse alongside the slice-of-struct backing-array
+// reuse. It should report 0 allocs, versus 2 for BenchmarkNested_U, which
+// decodes into a fresh value every iteration.
+func BenchmarkNested_U_Reuse(b *testing.B) {
+	in := shapes.Inner{X: 7, Y: 8}
+	v := shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &in, Path: []shapes.Inner{{X: 3, Y: 4}, {X: 5, Y: 6}, {X: 7, Y: 8}}}
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Nested
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
 func BenchmarkCollection_U(b *testing.B) {
 	v := shapes.CollectionHeavy{Counts: map[string]int64{"a": 1, "b": 2, "c": 3, "d": 4}, Floats: []float64{1, 2, 3, 4, 5}, Names: []string{"x", "y", "z"}}
 	buf := make([]byte, v.Size())
@@ -1262,6 +1751,145 @@ func BenchmarkCollection_U_Reuse(b *testing.B) {
 	var o shapes.CollectionHeavy
 
 	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// benchInto benchmarks codec.Into with a reused buffer: the single-pass Append
+// encode, the steady-state write-loop pattern.
+func benchInto(b *testing.B, m codec.Marshaler) {
+	buf := make([]byte, 0, m.Size())
+	b.ReportAllocs()
+
+	for b.Loop() {
+		buf = codec.Into(m, buf)
+	}
+}
+
+func BenchmarkNested_Into(b *testing.B) {
+	in := shapes.Inner{X: 7, Y: 8}
+	v := shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &in, Path: []shapes.Inner{{X: 3, Y: 4}, {X: 5, Y: 6}, {X: 7, Y: 8}}}
+	benchInto(b, &v)
+}
+
+func BenchmarkCollection_Into(b *testing.B) {
+	v := shapes.CollectionHeavy{Counts: map[string]int64{"a": 1, "b": 2, "c": 3, "d": 4}, Floats: []float64{1, 2, 3, 4, 5}, Names: []string{"x", "y", "z"}}
+	benchInto(b, &v)
+}
+
+func BenchmarkStringHeavy_Into(b *testing.B) {
+	v := shapes.StringHeavy{Title: "Title", Body: "lorem ipsum dolor sit amet consectetur", Tags: []string{"go", "fast", "serde"}}
+	benchInto(b, &v)
+}
+
+// BenchmarkUnion round-trips a tagged-union field plus a small slice of unions,
+// covering the tag switch on encode and the assert-or-allocate path on decode.
+func BenchmarkUnion_M(b *testing.B) {
+	v := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}}
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkUnion_U(b *testing.B) {
+	v := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}}
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Drawing
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkMap1k round-trips a 1000-entry map, scaling the codec's weakest
+// shape well past the tiny fixtures above.
+func mapSample1k() shapes.CollectionHeavy {
+	m := make(map[string]int64, 1000)
+
+	for i := range 1000 {
+		m[fmt.Sprintf("key-%04d", i)] = int64(i)
+	}
+
+	return shapes.CollectionHeavy{Counts: m}
+}
+
+func BenchmarkMap1k_M(b *testing.B) {
+	v := mapSample1k()
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkMap1k_U(b *testing.B) {
+	v := mapSample1k()
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.CollectionHeavy
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkStringSlice1k round-trips a 1000-element []string, the
+// variable-size element loop at scale (each decoded string aliases the input).
+func stringSample1k() shapes.StringHeavy {
+	tags := make([]string, 1000)
+
+	for i := range tags {
+		tags[i] = fmt.Sprintf("tag-%04d-abcdefghij", i)
+	}
+
+	return shapes.StringHeavy{Title: "big", Tags: tags}
+}
+
+func BenchmarkStringSlice1k_M(b *testing.B) {
+	v := stringSample1k()
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkStringSlice1k_U(b *testing.B) {
+	v := stringSample1k()
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.StringHeavy
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkStructSlice1k round-trips a 1000-element slice of blittable structs,
+// the shape the fast-mode bulk copy turns into a single memmove each way.
+func BenchmarkStructSlice1k_M(b *testing.B) {
+	v := shapes.Nested{Label: "big", Path: make([]shapes.Inner, 1000)}
+
+	for i := range v.Path {
+		v.Path[i] = shapes.Inner{X: int32(i), Y: int32(-i)}
+	}
+
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkStructSlice1k_U(b *testing.B) {
+	v := shapes.Nested{Label: "big", Path: make([]shapes.Inner, 1000)}
+
+	for i := range v.Path {
+		v.Path[i] = shapes.Inner{X: int32(i), Y: int32(-i)}
+	}
+
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Nested
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkWideList_M measures marshalling a slice of wide, variable-size
+// structs, the shape where copying elements into a range value variable (the
+// pre-index-loop codegen) is most expensive.
+func BenchmarkWideList_M(b *testing.B) {
+	items := make([]shapes.WideItem, 16)
+
+	for i := range items {
+		items[i] = shapes.WideItem{ID: uint64(i), A: 1.5, B: 2.5, C: 3.5, D: 4.5, Blob: [32]byte{byte(i)}, Note: "note"}
+	}
+
+	v := shapes.WideList{Items: items}
+	benchM(b, v.Size, v.Marshal)
 }
 
 func BenchmarkStringHeavy_U(b *testing.B) {

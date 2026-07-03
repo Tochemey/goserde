@@ -29,6 +29,7 @@ import (
 	"go/types"
 	"reflect"
 	"slices"
+	"strings"
 )
 
 const (
@@ -57,27 +58,36 @@ func emitf(b *bytes.Buffer, format string, args ...any) {
 func (g *generator) generate() ([]byte, error) {
 	var b bytes.Buffer
 
-	needsUnsafe := false
-
 	for _, t := range g.targets {
+		if g.owned[t] {
+			// The user declared the codec methods by hand elsewhere in the
+			// package; emitting them again would redeclare the methods. The
+			// type stays a valid target for nested fields and unions. Its
+			// fields are not inspected at all: a hand-written codec may cover
+			// types the generator does not support.
+			continue
+		}
+
 		fs, err := g.fieldsOf(t)
 		if err != nil {
 			return nil, err
 		}
 
-		if !g.safe && g.blittable(fs) {
+		if !g.safe && g.blittable(t, fs) {
 			// Fixed-width struct: single memory copy (fastape/gencode-fixed tier).
 			// Safe mode skips this native-memory path for portable, field-by-field
 			// little-endian encoding (no unsafe, no memmove).
 			g.emitBlitSize(&b, t)
 			g.emitBlitMarshal(&b, t)
+			g.emitBlitAppend(&b, t)
 			g.emitBlitUnmarshal(&b, t)
-			needsUnsafe = true
+			g.usedUnsafe = true
 			continue
 		}
 
 		g.emitSize(&b, t, fs)
 		g.emitMarshal(&b, t, fs)
+		g.emitAppend(&b, t, fs)
 		g.emitUnmarshal(&b, t, fs)
 	}
 
@@ -90,14 +100,14 @@ func (g *generator) generate() ([]byte, error) {
 		emitf(out, "\t\"time\"\n")
 	}
 
-	if needsUnsafe {
+	if g.usedUnsafe {
 		emitf(out, "\t\"unsafe\"\n")
 	}
 
 	emitf(out, ")\n\n")
 	emitf(out, "var _ = %s.UvarintSize // keep import if unused\n\n", g.codecQual)
 
-	if needsUnsafe {
+	if g.usedUnsafe {
 		emitf(out, "var _ unsafe.Pointer\n\n")
 	}
 
@@ -266,7 +276,25 @@ func (g *generator) sizeExpr(b *bytes.Buffer, ref string, t types.Type) {
 			return
 		}
 
-		// variable-size elements (e.g. []string)
+		if g.blitElem(u.Elem()) {
+			// Fast mode: each element's wire size is its in-memory size. The
+			// unsafe.Sizeof operand is not evaluated, so [0] is safe on empty.
+			g.usedUnsafe = true
+			emitf(b, "\ts += int(unsafe.Sizeof(%s[0])) * len(%s)\n", ref, ref)
+
+			return
+		}
+
+		// Variable-size elements (e.g. []string).
+		if indexElems(u.Elem()) {
+			iv := freshIdx()
+			emitf(b, "\tfor %s := range %s {\n", iv, ref)
+			g.sizeExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+			emitf(b, "\t}\n")
+
+			return
+		}
+
 		iv := freshVar()
 		emitf(b, "\tfor _, %s := range %s {\n", iv, ref)
 		g.sizeExpr(b, iv, u.Elem())
@@ -275,6 +303,14 @@ func (g *generator) sizeExpr(b *bytes.Buffer, ref string, t types.Type) {
 		// Fixed length, no length prefix on the wire.
 		if esz, fixed := fixedSize(u.Elem()); fixed {
 			emitf(b, "\ts += %d\n", int(u.Len())*esz)
+			return
+		}
+
+		if g.blitElem(u.Elem()) {
+			// Fast mode: the whole array's wire bytes are its in-memory bytes.
+			g.usedUnsafe = true
+			emitf(b, "\ts += int(unsafe.Sizeof(%s))\n", ref)
+
 			return
 		}
 
@@ -297,7 +333,7 @@ func (g *generator) sizeExpr(b *bytes.Buffer, ref string, t types.Type) {
 		emitf(b, "\t}\n")
 	case *types.Struct:
 		// Named struct: delegate to its generated Size().
-		emitf(b, "\ts += (&%s).Size()\n", ref)
+		emitf(b, "\ts += %s.Size()\n", addrOf(ref))
 	case *types.Interface:
 		// Tagged union: tag varint + the active member's own Size, or just the
 		// nil tag (one byte) when the interface is nil.
@@ -368,6 +404,40 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 			return
 		}
 
+		if !g.safe && memCopyable(u.Elem()) {
+			// Fast mode: the elements' wire bytes equal the slice's backing
+			// memory, so one copy replaces the element loop (trusted bytes,
+			// same arch).
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s))\n", ref, byteCount(esz, fmt.Sprintf("len(%s)", ref)))
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if g.blitElem(u.Elem()) {
+			// Fast mode: each element's Marshal is a memmove of its
+			// unsafe.Sizeof bytes and the backing array is contiguous with
+			// that stride, so one copy is byte-identical to the loop.
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s[0]))*len(%s)))\n", ref, ref, ref)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if indexElems(u.Elem()) {
+			iv := freshIdx()
+			emitf(b, "\tfor %s := range %s {\n", iv, ref)
+			g.marshalExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+			emitf(b, "\t}\n")
+
+			return
+		}
+
 		iv := freshVar()
 		emitf(b, "\tfor _, %s := range %s {\n", iv, ref)
 		g.marshalExpr(b, iv, u.Elem())
@@ -376,6 +446,23 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		// No length prefix; []byte-style bulk copy for byte arrays.
 		if isByteArray(u) {
 			emitf(b, "\ti += copy(b[i:], %s[:])\n", ref)
+			return
+		}
+
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			// Fast mode: fixed-width elements copy as one raw-memory block.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d))\n", ref, int(u.Len())*esz)
+
+			return
+		}
+
+		if u.Len() > 0 && g.blitElem(u.Elem()) {
+			// Fast mode: blittable struct elements copy as one raw-memory block.
+			g.usedUnsafe = true
+			emitf(b, "\ti += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s))))\n", ref, ref)
+
 			return
 		}
 
@@ -395,7 +482,7 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		g.marshalExpr(b, vv, u.Elem())
 		emitf(b, "\t}\n")
 	case *types.Struct:
-		emitf(b, "\ti += (&%s).Marshal(b[i:])\n", ref)
+		emitf(b, "\ti += %s.Marshal(b[i:])\n", addrOf(ref))
 	case *types.Interface:
 		// Tagged union: write the member's 1-based tag (0 for nil) then delegate
 		// to the active member's Marshal.
@@ -407,6 +494,148 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		}
 
 		emitf(b, "\tcase nil:\n\t\ti += %s.PutUvarint(b[i:], 0)\n", q)
+		emitf(b, "\tdefault:\n\t\tpanic(%q)\n\t}\n", unionPanic(g, t))
+	}
+}
+
+// emitAppend writes the Append method for t: the same encoding as Marshal, but
+// growing the destination as it goes instead of requiring a Size()-sized
+// buffer. It is what lets codec.Into encode in a single tree walk.
+func (g *generator) emitAppend(b *bytes.Buffer, t *types.Named, fs []field) {
+	recv := t.Obj().Name()
+
+	emitf(b, "// Append appends the receiver's encoding to b, growing it as needed, and\n")
+	emitf(b, "// returns the extended slice. It writes the same bytes as Marshal without\n")
+	emitf(b, "// needing a Size() pass first.\n")
+	emitf(b, "func (r *%s) Append(b []byte) []byte {\n", recv)
+
+	for _, f := range fs {
+		g.appendExpr(b, "r."+f.name, f.typ)
+	}
+
+	emitf(b, "\treturn b\n}\n\n")
+}
+
+// appendExpr writes code that appends the encoding of the value ref of type t
+// to the slice b. It mirrors marshalExpr case for case; the wire bytes are
+// identical, only the destination management differs.
+func (g *generator) appendExpr(b *bytes.Buffer, ref string, t types.Type) {
+	q := g.codecQual
+
+	if isTime(t) {
+		g.usedTime = true
+		emitf(b, "\tb = %s.AppendU64(b, uint64(%s.UnixNano()))\n", q, ref)
+		return
+	}
+
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.Bool:
+			emitf(b, "\tif %s {\n\t\tb = append(b, 1)\n\t} else {\n\t\tb = append(b, 0)\n\t}\n", ref)
+		case types.Uint8, types.Int8:
+			emitf(b, "\tb = append(b, byte(%s))\n", ref)
+		case types.Uint16, types.Int16:
+			emitf(b, "\tb = %s.AppendU16(b, uint16(%s))\n", q, ref)
+		case types.Uint32, types.Int32:
+			emitf(b, "\tb = %s.AppendU32(b, uint32(%s))\n", q, ref)
+		case types.Float32:
+			emitf(b, "\tb = %s.AppendU32(b, %s.F32bits(%s))\n", q, q, ref)
+		case types.Uint64, types.Uint, types.Int64, types.Int:
+			emitf(b, "\tb = %s.AppendU64(b, uint64(%s))\n", q, ref)
+		case types.Float64:
+			emitf(b, "\tb = %s.AppendU64(b, %s.F64bits(%s))\n", q, q, ref)
+		case types.String:
+			emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+			emitf(b, "\tb = append(b, %s...)\n", ref)
+		}
+	case *types.Slice:
+		emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+
+		if isBytes(u) {
+			emitf(b, "\tb = append(b, %s...)\n", ref)
+			return
+		}
+
+		if !g.safe && memCopyable(u.Elem()) {
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s)...)\n", ref, byteCount(esz, fmt.Sprintf("len(%s)", ref)))
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if g.blitElem(u.Elem()) {
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s[0]))*len(%s))...)\n", ref, ref, ref)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if indexElems(u.Elem()) {
+			iv := freshIdx()
+			emitf(b, "\tfor %s := range %s {\n", iv, ref)
+			g.appendExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		iv := freshVar()
+		emitf(b, "\tfor _, %s := range %s {\n", iv, ref)
+		g.appendExpr(b, iv, u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Array:
+		if isByteArray(u) {
+			emitf(b, "\tb = append(b, %s[:]...)\n", ref)
+			return
+		}
+
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d)...)\n", ref, int(u.Len())*esz)
+
+			return
+		}
+
+		if u.Len() > 0 && g.blitElem(u.Elem()) {
+			g.usedUnsafe = true
+			emitf(b, "\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s)))...)\n", ref, ref)
+
+			return
+		}
+
+		iv := freshIdx()
+		emitf(b, "\tfor %s := 0; %s < %d; %s++ {\n", iv, iv, u.Len(), iv)
+		g.appendExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Pointer:
+		emitf(b, "\tif %s != nil {\n\t\tb = append(b, 1)\n", ref)
+		g.appendExpr(b, "(*"+ref+")", u.Elem())
+		emitf(b, "\t} else {\n\t\tb = append(b, 0)\n\t}\n")
+	case *types.Map:
+		emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+		kv, vv := freshVar(), freshVar()
+		emitf(b, "\tfor %s, %s := range %s {\n", kv, vv, ref)
+		g.appendExpr(b, kv, u.Key())
+		g.appendExpr(b, vv, u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Struct:
+		emitf(b, "\tb = %s.Append(b)\n", addrOf(ref))
+	case *types.Interface:
+		members, _ := g.unionMembersOf(t)
+		emitf(b, "\tswitch v := %s.(type) {\n", ref)
+
+		for idx, m := range members {
+			emitf(b, "\tcase *%s:\n\t\tb = %s.AppendUvarint(b, %d)\n\t\tb = v.Append(b)\n", types.TypeString(m, relativeTo(g)), q, idx+1)
+		}
+
+		emitf(b, "\tcase nil:\n\t\tb = %s.AppendUvarint(b, 0)\n", q)
 		emitf(b, "\tdefault:\n\t\tpanic(%q)\n\t}\n", unionPanic(g, t))
 	}
 }
@@ -506,6 +735,33 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		// Reuse the destination's backing array when it already has the capacity,
 		// so repeated decodes into the same value stay allocation-free.
 		emitf(b, "\tif cap(%s) >= int(nn) {\n\t\t%s = %s[:nn]\n\t} else {\n\t\t%s = make(%s, nn)\n\t}\n", ref, ref, ref, ref, tn)
+
+		if !g.safe && memCopyable(u.Elem()) {
+			// Fast mode: fill the owned backing array with one copy instead of
+			// an element loop; a truncated buffer panics on the slice bound,
+			// matching the fast-mode contract.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			n := byteCount(esz, "int(nn)")
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s), b[i:i+%s])\n\ti += %s\n", ref, n, n, n)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if g.blitElem(u.Elem()) {
+			// Fast mode: blittable struct elements fill the owned backing
+			// array with one copy; the byte count needs a temporary because
+			// only the generated code can name unsafe.Sizeof.
+			g.usedUnsafe = true
+			tv := freshIdx()
+			emitf(b, "\t%s := int(unsafe.Sizeof(%s[0])) * int(nn)\n", tv, ref)
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s), b[i:i+%s])\n\ti += %s\n", ref, tv, tv, tv)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
 		iv := freshIdx()
 		emitf(b, "\tfor %s := range %s {\n", iv, ref)
 		g.unmarshalExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
@@ -519,6 +775,26 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 			return
 		}
 
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			// Fast mode: fixed-width elements decode as one raw-memory block.
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			total := int(u.Len()) * esz
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d), b[i:i+%d])\n\ti += %d\n", ref, total, total, total)
+
+			return
+		}
+
+		if u.Len() > 0 && g.blitElem(u.Elem()) {
+			// Fast mode: blittable struct elements decode as one raw-memory block.
+			g.usedUnsafe = true
+			tv := freshIdx()
+			emitf(b, "\t%s := int(unsafe.Sizeof(%s))\n", tv, ref)
+			emitf(b, "\tcopy(unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s), b[i:i+%s])\n\ti += %s\n", ref, tv, tv, tv)
+
+			return
+		}
+
 		iv := freshIdx()
 		emitf(b, "\tfor %s := 0; %s < %d; %s++ {\n", iv, iv, u.Len(), iv)
 		g.unmarshalExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
@@ -527,10 +803,11 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		elemTn := types.TypeString(u.Elem(), relativeTo(g))
 		g.guardN(b, 1) // nil flag
 		emitf(b, "\tif b[i] != 0 {\n\t\ti++\n")
-		tmp := freshIdx()
-		emitf(b, "\t\tvar %s %s\n", tmp, elemTn)
-		g.unmarshalExpr(b, tmp, u.Elem())
-		emitf(b, "\t\t%s = &%s\n", ref, tmp)
+		// Reuse a non-nil destination pointee (mirroring slice and map reuse)
+		// so repeated decodes into the same value skip the per-pointer
+		// allocation. Decoding overwrites the pointee in full.
+		emitf(b, "\t\tif %s == nil {\n\t\t\t%s = new(%s)\n\t\t}\n", ref, ref, elemTn)
+		g.unmarshalExpr(b, "(*"+ref+")", u.Elem())
 		emitf(b, "\t} else {\n\t\ti++\n\t\t%s = nil\n\t}\n", ref)
 	case *types.Map:
 		keyTn := types.TypeString(u.Key(), relativeTo(g))
@@ -554,9 +831,9 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 	case *types.Struct:
 		if g.safe {
 			// Delegate to the nested type's safe Unmarshal and propagate its error.
-			emitf(b, "\t{\n\t\tnnn, err := (&%s).Unmarshal(b[i:])\n\t\tif err != nil {\n\t\t\treturn i, err\n\t\t}\n\t\ti += nnn\n\t}\n", ref)
+			emitf(b, "\t{\n\t\tnnn, err := %s.Unmarshal(b[i:])\n\t\tif err != nil {\n\t\t\treturn i, err\n\t\t}\n\t\ti += nnn\n\t}\n", addrOf(ref))
 		} else {
-			emitf(b, "\t{\n\t\tnnn, _ := (&%s).Unmarshal(b[i:])\n\t\ti += nnn\n\t}\n", ref)
+			emitf(b, "\t{\n\t\tnnn, _ := %s.Unmarshal(b[i:])\n\t\ti += nnn\n\t}\n", addrOf(ref))
 		}
 	case *types.Interface:
 		// Tagged union: read the tag, then decode the matching member (tag 0 is
@@ -569,15 +846,20 @@ func (g *generator) unmarshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 
 		for idx, m := range members {
 			v := freshIdx()
-			emitf(b, "\tcase %d:\n\t\tvar %s %s\n", idx+1, v, types.TypeString(m, relativeTo(g)))
+			mtn := types.TypeString(m, relativeTo(g))
+			// Reuse the existing member value when its dynamic type already
+			// matches the tag (the failed-assertion zero value is nil, so one
+			// nil check covers both a mismatch and a nil field).
+			emitf(b, "\tcase %d:\n\t\t%s, _ := %s.(*%s)\n", idx+1, v, ref, mtn)
+			emitf(b, "\t\tif %s == nil {\n\t\t\t%s = new(%s)\n\t\t}\n", v, v, mtn)
 
 			if g.safe {
-				emitf(b, "\t\tnnn, err := (&%s).Unmarshal(b[i:])\n\t\tif err != nil {\n\t\t\treturn i, err\n\t\t}\n\t\ti += nnn\n", v)
+				emitf(b, "\t\tnnn, err := %s.Unmarshal(b[i:])\n\t\tif err != nil {\n\t\t\treturn i, err\n\t\t}\n\t\ti += nnn\n", v)
 			} else {
-				emitf(b, "\t\tnnn, _ := (&%s).Unmarshal(b[i:])\n\t\ti += nnn\n", v)
+				emitf(b, "\t\tnnn, _ := %s.Unmarshal(b[i:])\n\t\ti += nnn\n", v)
 			}
 
-			emitf(b, "\t\t%s = &%s\n", ref, v)
+			emitf(b, "\t\t%s = %s\n", ref, v)
 		}
 
 		emitf(b, "\tdefault:\n\t\treturn i, %s.ErrUnknownUnionTag\n\t}\n", q)
@@ -720,6 +1002,102 @@ func freshVar() string { varCounter++; return fmt.Sprintf("e%d", varCounter) }
 // freshIdx returns a unique loop/temporary name (j1, j2, ...).
 func freshIdx() string { varCounter++; return fmt.Sprintf("j%d", varCounter) }
 
+// indexElems reports whether slice loops over elements of type t should
+// iterate by index instead of by value. A range value variable copies each
+// element out of the slice, which costs real time once elements are structs or
+// arrays (including time.Time); for strings and other slim headers the copy is
+// cheaper than the repeated indexing.
+func indexElems(t types.Type) bool {
+	switch t.Underlying().(type) {
+	case *types.Struct, *types.Array:
+		return true
+	default:
+		return false
+	}
+}
+
+// addrOf returns the expression for &ref. When ref is itself a parenthesized
+// dereference like (*x), taking its address is just x again, so the pointer is
+// returned directly instead of emitting the (&(*x)) that staticcheck's SA4001
+// flags.
+func addrOf(ref string) string {
+	if inner, ok := strings.CutPrefix(ref, "(*"); ok && strings.HasSuffix(inner, ")") {
+		return strings.TrimSuffix(inner, ")")
+	}
+
+	return "(&" + ref + ")"
+}
+
+// memCopyable reports whether t's fast-mode wire encoding is byte-identical to
+// its in-memory representation, so a slice or array of it can be bulk-copied
+// with a single memmove instead of an element loop. That holds for the
+// explicitly sized basics (bool, u/int8..64, float32/64) and arrays of them.
+// int and uint are excluded: they encode as 8 wire bytes but their in-memory
+// width is platform-dependent. time.Time is a struct encoded as UnixNano,
+// never raw memory.
+func memCopyable(t types.Type) bool {
+	if isTime(t) {
+		return false
+	}
+
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.Bool, types.Uint8, types.Int8, types.Uint16, types.Int16,
+			types.Uint32, types.Int32, types.Float32,
+			types.Uint64, types.Int64, types.Float64:
+			return true
+		}
+	case *types.Array:
+		return memCopyable(u.Elem())
+	}
+
+	return false
+}
+
+// blitElem reports whether t is a named struct whose generated fast-mode codec
+// is the blittable memmove, so a slice or array of it can be bulk-copied as one
+// raw-memory block: each element's Marshal/Unmarshal is already a copy of its
+// unsafe.Sizeof bytes, and Go lays slice and array elements out contiguously
+// with exactly that stride. The element's wire size is unsafe.Sizeof, which
+// only the generated code can name (padding is platform-dependent), so callers
+// emit unsafe.Sizeof expressions instead of a generator-time constant.
+func (g *generator) blitElem(t types.Type) bool {
+	if g.safe || isTime(t) {
+		return false
+	}
+
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+
+	if _, isStruct := named.Underlying().(*types.Struct); !isStruct || !g.isTarget(named) {
+		return false
+	}
+
+	// A user-owned codec is a black box: nothing guarantees its Marshal is the
+	// blittable memmove, so a bulk copy that bypasses it could change the wire
+	// format. Such elements keep the per-element method loop.
+	if g.owned[named] {
+		return false
+	}
+
+	fs, err := g.fieldsOf(named)
+
+	return err == nil && g.blittable(named, fs)
+}
+
+// byteCount returns the emitted expression for count elements of esz bytes,
+// folding away the multiplier for 1-byte elements.
+func byteCount(esz int, count string) string {
+	if esz == 1 {
+		return count
+	}
+
+	return fmt.Sprintf("%d*%s", esz, count)
+}
+
 // isFixedWidth reports whether t occupies a fixed number of raw memory bytes
 // that survive a same-arch memmove: a fixed-width basic, or an array (possibly
 // nested) of them. time.Time is deliberately excluded — it is a struct encoded
@@ -749,8 +1127,14 @@ func isFixedWidth(t types.Type) bool {
 // them), so the whole struct can be copied as raw memory. Strings, slices,
 // pointers, and maps disqualify it. This is the trusted-bytes, same-arch fast
 // path that puts fixed structs in the ~sub-ns tier.
-func (g *generator) blittable(fs []field) bool {
-	if len(fs) == 0 {
+//
+// The serializable fields fs must also cover the entire struct t: the blit
+// codec memmoves the whole value, so a field skipped by fieldsOf (unexported
+// or tagged goserde:"-") would leak its bytes onto the wire and be overwritten
+// on decode, violating the exclusion contract. fieldsOf only ever drops
+// fields, so full coverage is exactly len(fs) == NumFields.
+func (g *generator) blittable(t *types.Named, fs []field) bool {
+	if len(fs) == 0 || len(fs) != t.Underlying().(*types.Struct).NumFields() {
 		return false
 	}
 
@@ -782,6 +1166,16 @@ func (g *generator) emitBlitMarshal(b *bytes.Buffer, t *types.Named) {
 	emitf(b, "\tn := int(unsafe.Sizeof(*r))\n")
 	emitf(b, "\tcopy(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), n))\n")
 	emitf(b, "\treturn n\n}\n\n")
+}
+
+// emitBlitAppend writes the Append method for a blittable struct: a single
+// raw-memory append of the receiver.
+func (g *generator) emitBlitAppend(b *bytes.Buffer, t *types.Named) {
+	recv := t.Obj().Name()
+
+	emitf(b, "// Append appends %s as raw memory to b and returns the extended slice.\n", recv)
+	emitf(b, "func (r *%s) Append(b []byte) []byte {\n", recv)
+	emitf(b, "\treturn append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)\n}\n\n")
 }
 
 // emitBlitUnmarshal writes the Unmarshal method for a blittable struct: a single

@@ -98,6 +98,58 @@ func TestRecordVariants(t *testing.T) {
 	}
 }
 
+// TestRecordAppendMatchesMarshal checks the single-pass Append against the
+// two-pass Size+Marshal: identical bytes on the canonical sample and on the
+// variant that exercises the false-flag and empty-collection branches, with an
+// existing prefix preserved.
+func TestRecordAppendMatchesMarshal(t *testing.T) {
+	for i, in := range []*Record{
+		sample(),
+		{ID: 0, Score: -2.5, Active: false, Name: "", Tags: nil, Blob: nil},
+	} {
+		want := make([]byte, in.Size())
+		in.Marshal(want)
+
+		if got := in.Append(nil); !bytes.Equal(got, want) {
+			t.Errorf("case %d: Append=%x, Marshal=%x", i, got, want)
+		}
+
+		prefix := []byte{0xAA, 0xBB}
+		got := in.Append(prefix)
+
+		if !bytes.Equal(got[:2], prefix) || !bytes.Equal(got[2:], want) {
+			t.Errorf("case %d: Append after prefix mismatch", i)
+		}
+	}
+}
+
+// TestRecordDecodeReuse decodes twice into the same value: the second decode
+// must reuse the Tags backing array (the capacity path) and still round-trip.
+func TestRecordDecodeReuse(t *testing.T) {
+	in := sample()
+	buf := make([]byte, in.Size())
+	in.Marshal(buf)
+
+	var out Record
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	first := &out.Tags[0]
+
+	if _, err := out.Unmarshal(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if &out.Tags[0] != first {
+		t.Error("second decode should reuse the Tags backing array")
+	}
+
+	if !reflect.DeepEqual(in, &out) {
+		t.Fatalf("reuse round-trip mismatch:\n in=%+v\nout=%+v", in, &out)
+	}
+}
+
 // BenchmarkGoserdeMarshal measures Marshal into a reused buffer, the intended
 // hot-path usage.
 func BenchmarkGoserdeMarshal(b *testing.B) {

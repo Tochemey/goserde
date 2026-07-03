@@ -23,6 +23,11 @@ func (r *Point) Marshal(b []byte) int {
 	return n
 }
 
+// Append appends Point as raw memory to b and returns the extended slice.
+func (r *Point) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
+}
+
 // Unmarshal copies raw memory from b back into Point.
 func (r *Point) Unmarshal(b []byte) (int, error) {
 	n := int(unsafe.Sizeof(*r))
@@ -73,14 +78,41 @@ func (r *User) Marshal(b []byte) int {
 		i += copy(b[i:], codec.S2B(e2))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Scores)))
-	for _, e3 := range r.Scores {
-		codec.PutU32(b[i:], uint32(e3))
-		i += 4
+	if len(r.Scores) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Scores[0])), 4*len(r.Scores)))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Avatar)))
 	i += copy(b[i:], r.Avatar)
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *User) Append(b []byte) []byte {
+	b = codec.AppendU64(b, uint64(r.ID))
+	b = codec.AppendU16(b, uint16(r.Age))
+	b = codec.AppendU32(b, codec.F32bits(r.Height))
+	if r.Verified {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	b = codec.AppendUvarint(b, uint64(len(r.Nicks)))
+	for _, e3 := range r.Nicks {
+		b = codec.AppendUvarint(b, uint64(len(e3)))
+		b = append(b, e3...)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Scores)))
+	if len(r.Scores) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Scores[0])), 4*len(r.Scores))...)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Avatar)))
+	b = append(b, r.Avatar...)
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -130,10 +162,8 @@ func (r *User) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Scores = make([]int32, nn)
 		}
-		for j5 := range r.Scores {
-			r.Scores[j5] = int32(codec.U32(b[i:]))
-			i += 4
-		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Scores[0])), 4*int(nn)), b[i:i+4*int(nn)])
+		i += 4 * int(nn)
 	}
 	nn, cc = codec.Uvarint(b[i:])
 	i += cc

@@ -40,6 +40,7 @@ package codec
 
 import (
 	"errors"
+	"math/bits"
 	"unsafe"
 )
 
@@ -125,7 +126,9 @@ func U64(b []byte) uint64 {
 
 // PutUvarint writes v as an unsigned LEB128 varint at b[0:] and returns the
 // number of bytes written. Varints encode length prefixes and small integers
-// compactly; the caller must ensure b has room for UvarintSize(v) bytes.
+// compactly; the caller must ensure b has room for UvarintSize(v) bytes. The
+// single-byte case (v below 0x80) exits on the first iteration, and the whole
+// function inlines at call sites.
 func PutUvarint(b []byte, v uint64) int {
 	i := 0
 	for v >= 0x80 {
@@ -138,7 +141,9 @@ func PutUvarint(b []byte, v uint64) int {
 }
 
 // Uvarint reads an unsigned varint from b, returning the value and bytes read.
-// A non-positive count signals an error (overflow or truncation).
+// A non-positive count signals an error (overflow or truncation). The
+// single-byte case (the overwhelmingly common one for length prefixes) returns
+// on the first iteration, and the whole function inlines at call sites.
 func Uvarint(b []byte) (uint64, int) {
 	var x uint64
 	var s uint
@@ -156,14 +161,43 @@ func Uvarint(b []byte) (uint64, int) {
 	return 0, 0 // truncated
 }
 
-// UvarintSize returns the number of bytes PutUvarint would write for v.
+// UvarintSize returns the number of bytes PutUvarint would write for v. It is
+// branch-free: a varint spends 7 significant bits per byte, so the size is
+// ceil(bits/7), with v=0 still occupying one byte via the |1.
 func UvarintSize(v uint64) int {
-	n := 1
+	return (bits.Len64(v|1) + 6) / 7
+}
+
+// AppendU16 appends v as 2 little-endian bytes to b and returns the extended
+// slice. The Append* primitives back the generated Append methods, which
+// encode without a prior Size pass.
+func AppendU16(b []byte, v uint16) []byte {
+	return append(b, byte(v), byte(v>>8))
+}
+
+// AppendU32 appends v as 4 little-endian bytes to b and returns the extended
+// slice.
+func AppendU32(b []byte, v uint32) []byte {
+	return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+// AppendU64 appends v as 8 little-endian bytes to b and returns the extended
+// slice.
+func AppendU64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
+
+// AppendUvarint appends v as an unsigned LEB128 varint to b and returns the
+// extended slice. The single-byte case exits on the first iteration.
+func AppendUvarint(b []byte, v uint64) []byte {
 	for v >= 0x80 {
+		b = append(b, byte(v)|0x80)
 		v >>= 7
-		n++
 	}
-	return n
+
+	return append(b, byte(v))
 }
 
 // Zig zigzag-encodes a signed integer so that small-magnitude values (positive

@@ -22,7 +22,11 @@
 
 package benchcompare
 
-import "github.com/tochemey/goserde/codec"
+import (
+	"unsafe"
+
+	"github.com/tochemey/goserde/codec"
+)
 
 // Record mirrors codec.Record exactly, so goserde and mus serialize identical data.
 type Record struct {
@@ -56,9 +60,8 @@ func (r *Record) Marshal(b []byte) int {
 	i += codec.PutUvarint(b[i:], uint64(len(r.Name)))
 	i += copy(b[i:], codec.S2B(r.Name))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Tags)))
-	for _, t := range r.Tags {
-		codec.PutU32(b[i:], t)
-		i += 4
+	if len(r.Tags) > 0 {
+		i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*len(r.Tags)))
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Blob)))
 	i += copy(b[i:], r.Blob)
@@ -76,10 +79,16 @@ func (r *Record) Unmarshal(b []byte) (int, error) {
 	i += int(n)
 	n, c = codec.Uvarint(b[i:])
 	i += c
-	r.Tags = make([]uint32, n)
-	for j := range r.Tags {
-		r.Tags[j] = codec.U32(b[i:])
-		i += 4
+	if n == 0 {
+		r.Tags = nil
+	} else {
+		if cap(r.Tags) >= int(n) {
+			r.Tags = r.Tags[:n]
+		} else {
+			r.Tags = make([]uint32, n)
+		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*int(n)), b[i:i+4*int(n)])
+		i += 4 * int(n)
 	}
 	n, c = codec.Uvarint(b[i:])
 	i += c
