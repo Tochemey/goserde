@@ -59,6 +59,15 @@ func (g *generator) generate() ([]byte, error) {
 	var b bytes.Buffer
 
 	for _, t := range g.targets {
+		if g.owned[t] {
+			// The user declared the codec methods by hand elsewhere in the
+			// package; emitting them again would redeclare the methods. The
+			// type stays a valid target for nested fields and unions. Its
+			// fields are not inspected at all: a hand-written codec may cover
+			// types the generator does not support.
+			continue
+		}
+
 		fs, err := g.fieldsOf(t)
 		if err != nil {
 			return nil, err
@@ -1064,6 +1073,13 @@ func (g *generator) blitElem(t types.Type) bool {
 	}
 
 	if _, isStruct := named.Underlying().(*types.Struct); !isStruct || !g.isTarget(named) {
+		return false
+	}
+
+	// A user-owned codec is a black box: nothing guarantees its Marshal is the
+	// blittable memmove, so a bulk copy that bypasses it could change the wire
+	// format. Such elements keep the per-element method loop.
+	if g.owned[named] {
 		return false
 	}
 

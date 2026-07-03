@@ -20,8 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Command goserdegen generates fast Marshal/Unmarshal/Size methods for Go structs
-// annotated with a `//goserde:generate` marker comment.
+// Command goserdegen generates fast Size/Marshal/Append/Unmarshal methods for
+// Go structs annotated with a `//goserde:generate` marker comment.
 //
 // Usage:
 //
@@ -31,6 +31,17 @@
 // library (no external deps), finds structs whose doc comment contains the
 // marker, and emits codec methods shaped exactly like the hand-tuned reference
 // in codec/record.go.
+//
+// -out names the generated file and may be customized, but it is always a bare
+// .go file name written into -dir: Go methods must be declared in the same
+// package as their receiver type, so the generated code cannot live anywhere
+// else. The out file itself is never parsed on the next run, so a stale copy
+// cannot break regeneration.
+//
+// A target that already declares all four codec methods elsewhere in the
+// package is user-owned: the user moved or hand-wrote its codec, and the
+// generator skips it (it stays valid as a nested field or union member).
+// Declaring only part of the method set is an error.
 package main
 
 import (
@@ -106,7 +117,7 @@ func main() {
 func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	dir := fs.String("dir", ".", "directory containing the package to scan")
-	out := fs.String("out", "goserde_gen.go", "output file name (written into -dir)")
+	out := fs.String("out", "goserde_gen.go", "output file name, a bare .go name written into -dir so the methods live in the structs' package")
 	safe := fs.Bool("safe", false, "emit bounds-checked Unmarshal that returns codec.ErrShortBuffer on truncated input instead of panicking")
 	showVersion := fs.Bool("version", false, "print the goserdegen version and exit")
 
@@ -121,7 +132,11 @@ func run(args []string, stdout io.Writer) error {
 		return nil
 	}
 
-	g, err := load(*dir, codecPkgPath(), *safe)
+	if err := validateOut(*out); err != nil {
+		return err
+	}
+
+	g, err := load(*dir, *out, codecPkgPath(), *safe)
 	if err != nil {
 		return err
 	}
@@ -136,8 +151,33 @@ func run(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	// Writes to the provided writer never meaningfully fail here.
-	_, _ = fmt.Fprintf(stdout, "goserdegen: wrote %s (%d types)\n", outPath, len(g.targets))
+	for _, name := range g.ownedNames() {
+		// Writes to the provided writer never meaningfully fail here.
+		_, _ = fmt.Fprintf(stdout, "goserdegen: skipping %s: codec methods are user-owned\n", name)
+	}
+
+	_, _ = fmt.Fprintf(stdout, "goserdegen: wrote %s (%d types)\n", outPath, len(g.targets)-len(g.owned))
+
+	return nil
+}
+
+// validateOut rejects -out values that could not hold methods for the scanned
+// structs. Go methods must be declared in the same package as their receiver
+// type, so the output must be a plain .go file inside -dir: a path would land
+// in a different package, and a _test.go suffix would exclude the methods from
+// ordinary builds.
+func validateOut(out string) error {
+	if out == "" || out != filepath.Base(out) {
+		return fmt.Errorf("-out %q must be a bare file name: methods must live in the structs' own package, so the file is always written into -dir", out)
+	}
+
+	if !strings.HasSuffix(out, ".go") || out == ".go" {
+		return fmt.Errorf("-out %q must name a .go file", out)
+	}
+
+	if strings.HasSuffix(out, "_test.go") {
+		return fmt.Errorf("-out %q must not be a _test.go file: the generated methods would be invisible to ordinary builds", out)
+	}
 
 	return nil
 }
@@ -153,14 +193,16 @@ type generator struct {
 	usedTime   bool                            // set during emission when any field is time.Time
 	usedUnsafe bool                            // set during emission when any codec takes a raw-memory copy path
 	targets    []*types.Named                  // annotated structs to generate codecs for, sorted by name
+	owned      map[*types.Named]bool           // targets whose codec methods the user declared by hand; skipped by emission
 	unions     map[*types.Named][]*types.Named // union interface -> ordered concrete members
 }
 
 // load parses and type-checks the package in dir using only the standard
 // library, collects the structs carrying the marker, and returns a generator
-// ready to emit. codecPkg is the import path of the codec support package and
-// safe selects bounds-checked decoding.
-func load(dir, codecPkg string, safe bool) (*generator, error) {
+// ready to emit. out is the generated file's name, excluded from parsing so a
+// stale previous run can never break type-checking; codecPkg is the import path
+// of the codec support package and safe selects bounds-checked decoding.
+func load(dir, out, codecPkg string, safe bool) (*generator, error) {
 	fset := token.NewFileSet()
 
 	entries, err := os.ReadDir(dir)
@@ -184,7 +226,7 @@ func load(dir, codecPkg string, safe bool) (*generator, error) {
 		if entry.IsDir() ||
 			!strings.HasSuffix(name, ".go") ||
 			strings.HasSuffix(name, "_test.go") ||
-			name == "goserde_gen.go" {
+			name == out {
 			continue
 		}
 
@@ -255,7 +297,64 @@ func load(dir, codecPkg string, safe bool) (*generator, error) {
 		return nil, err
 	}
 
+	if err := g.detectOwned(); err != nil {
+		return nil, err
+	}
+
 	return g, nil
+}
+
+// codecMethodNames is the full method set the generator emits. A target that
+// already declares all of them elsewhere in the package (the out file is never
+// parsed) is user-owned: the user adopted or hand-wrote its codec, and the
+// generator must not emit a duplicate set.
+var codecMethodNames = [...]string{"Append", "Marshal", "Size", "Unmarshal"}
+
+// detectOwned classifies each target by the codec methods it already declares.
+// All four present marks the target user-owned (emission skips it); a partial
+// set is an error, since mixing hand-written and generated codec methods on one
+// type has no sound owner for the wire format.
+func (g *generator) detectOwned() error {
+	g.owned = map[*types.Named]bool{}
+
+	for _, t := range g.targets {
+		var have []string
+
+		for m := range t.Methods() {
+			if slices.Contains(codecMethodNames[:], m.Name()) {
+				have = append(have, m.Name())
+			}
+		}
+
+		switch len(have) {
+		case 0:
+			// Nothing declared: the generator owns this codec.
+		case len(codecMethodNames):
+			g.owned[t] = true
+		default:
+			slices.Sort(have)
+
+			return fmt.Errorf(
+				"%s declares %s but not the full codec method set (Append, Marshal, Size, Unmarshal): move all four out of the generated file or none",
+				t.Obj().Name(), strings.Join(have, ", "))
+		}
+	}
+
+	return nil
+}
+
+// ownedNames returns the user-owned target names in sorted order, for stable
+// progress output.
+func (g *generator) ownedNames() []string {
+	var names []string
+
+	for t := range g.owned {
+		names = append(names, t.Obj().Name())
+	}
+
+	slices.Sort(names)
+
+	return names
 }
 
 // resolveUnions turns the raw union directives (interface name -> member names)

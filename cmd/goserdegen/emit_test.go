@@ -75,7 +75,7 @@ func genFixtureErr(t *testing.T, src string, safe bool) (string, error) {
 		t.Fatal(err)
 	}
 
-	g, err := load(dir, testCodecPkg, safe)
+	g, err := load(dir, "goserde_gen.go", testCodecPkg, safe)
 	if err != nil {
 		return "", err
 	}
@@ -614,7 +614,7 @@ func TestLoadErrors(t *testing.T) {
 
 // TestLoadEmptyDir checks an empty directory is reported rather than panicking.
 func TestLoadEmptyDir(t *testing.T) {
-	if _, err := load(t.TempDir(), testCodecPkg, false); err == nil {
+	if _, err := load(t.TempDir(), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Fatal("expected an error for a directory with no Go package")
 	}
 }
@@ -681,7 +681,7 @@ func writePkg(t *testing.T, src string) string {
 func loadGen(t *testing.T, src string, safe bool) *generator {
 	t.Helper()
 
-	g, err := load(writePkg(t, src), testCodecPkg, safe)
+	g, err := load(writePkg(t, src), "goserde_gen.go", testCodecPkg, safe)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -710,6 +710,117 @@ func checkPkg(t *testing.T, src string) (*generator, *types.Scope) {
 	}
 
 	return &generator{pkgName: f.Name.Name, pkg: pkg}, pkg.Scope()
+}
+
+// TestValidateOut checks the -out constraints: a bare non-test .go file name,
+// since the methods must land in the structs' own package and be visible to
+// ordinary builds.
+func TestValidateOut(t *testing.T) {
+	for _, ok := range []string{"goserde_gen.go", "custom_codecs.go", "zz_generated.go"} {
+		if err := validateOut(ok); err != nil {
+			t.Errorf("validateOut(%q) = %v, want nil", ok, err)
+		}
+	}
+
+	for _, bad := range []string{"", "sub/gen.go", "../gen.go", "/tmp/gen.go", "gen.txt", ".go", "gen_test.go"} {
+		if err := validateOut(bad); err == nil {
+			t.Errorf("validateOut(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+// TestLoadIgnoresStaleOutFile checks that the previous generated file, under
+// any -out name, is never parsed: a stale or broken one must not break
+// regeneration.
+func TestLoadIgnoresStaleOutFile(t *testing.T) {
+	dir := writePkg(t, "package fixture\n//goserde:generate\ntype T struct{ X int32 }\n")
+
+	if err := os.WriteFile(filepath.Join(dir, "custom_gen.go"), []byte("package broken !!!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := load(dir, "custom_gen.go", testCodecPkg, false); err != nil {
+		t.Errorf("stale out file must be ignored, got: %v", err)
+	}
+
+	// The same file breaks the load when it is NOT the out file, proving the
+	// exclusion is what saved it.
+	if _, err := load(dir, "goserde_gen.go", testCodecPkg, false); err == nil {
+		t.Error("expected a parse error when the broken file is not the out file")
+	}
+}
+
+// ownedMethods is a hand-written full codec method set for a type named T,
+// used to simulate a user adopting the generated methods into their own file.
+const ownedMethods = `
+func (t *T) Size() int { return 4 }
+func (t *T) Marshal(b []byte) int { return 4 }
+func (t *T) Append(b []byte) []byte { return b }
+func (t *T) Unmarshal(b []byte) (int, error) { return 4, nil }
+`
+
+// TestGenerateSkipsUserOwnedCodec checks that a target declaring the full
+// codec method set by hand is skipped: no duplicate methods are emitted, the
+// type remains usable as a nested field, and slices of it are never
+// bulk-copied (the hand-written codec is a black box).
+func TestGenerateSkipsUserOwnedCodec(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type T struct {
+	X int32
+}
+
+//goserde:generate
+type U struct {
+	F  T
+	FS []T
+}
+` + ownedMethods
+
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "func (r *T)") {
+		t.Errorf("user-owned T must not be regenerated, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "func (r *U) Marshal") {
+		t.Errorf("U must still be generated, got:\n%s", out)
+	}
+
+	// U delegates to T's hand-written methods and must not bulk-copy []T even
+	// though T's fields look blittable.
+	if !strings.Contains(out, "(&r.F).Marshal(b[i:])") {
+		t.Errorf("nested user-owned field must delegate to its methods, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "unsafe.Pointer(&r.FS[0])") {
+		t.Errorf("slice of a user-owned type must not be bulk-copied, got:\n%s", out)
+	}
+}
+
+// TestGeneratePartialCodecOwnershipError checks that declaring only part of
+// the codec method set is rejected with an error naming the methods found.
+func TestGeneratePartialCodecOwnershipError(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type T struct {
+	X int32
+}
+
+func (t *T) Size() int { return 4 }
+func (t *T) Marshal(b []byte) int { return 4 }
+`
+
+	_, err := genFixtureErr(t, src, false)
+	if err == nil {
+		t.Fatal("expected an error for partial codec ownership")
+	}
+
+	if !strings.Contains(err.Error(), "Marshal, Size") || !strings.Contains(err.Error(), "full codec method set") {
+		t.Errorf("error should name the declared methods, got: %v", err)
+	}
 }
 
 // TestRun exercises the run entry point across its success and failure paths.
@@ -744,6 +855,29 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("bad out name", func(t *testing.T) {
+		if err := run([]string{"goserdegen", "-dir", writePkg(t, valid), "-out", "sub/gen.go"}, io.Discard); err == nil {
+			t.Error("expected an error for a path-like -out")
+		}
+	})
+
+	t.Run("user-owned notice", func(t *testing.T) {
+		dir := writePkg(t, valid+ownedMethods)
+
+		var out bytes.Buffer
+		if err := run([]string{"goserdegen", "-dir", dir, "-out", "gen.go"}, &out); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+
+		if !strings.Contains(out.String(), "skipping T: codec methods are user-owned") {
+			t.Errorf("expected the user-owned notice, got %q", out.String())
+		}
+
+		if !strings.Contains(out.String(), "(0 types)") {
+			t.Errorf("expected zero emitted types, got %q", out.String())
+		}
+	})
+
 	t.Run("bad flag", func(t *testing.T) {
 		if err := run([]string{"goserdegen", "-nope"}, io.Discard); err == nil {
 			t.Error("expected an error for an unknown flag")
@@ -759,9 +893,14 @@ func TestRun(t *testing.T) {
 	t.Run("write error", func(t *testing.T) {
 		dir := writePkg(t, valid)
 
-		// -out into a nonexistent subdirectory makes WriteFile fail.
-		if err := run([]string{"goserdegen", "-dir", dir, "-out", "nope/gen.go"}, io.Discard); err == nil {
-			t.Error("expected an error writing into a missing subdirectory")
+		// A directory occupying the out name makes WriteFile fail (a path-like
+		// -out no longer reaches the write; validateOut rejects it first).
+		if err := os.Mkdir(filepath.Join(dir, "gen.go"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := run([]string{"goserdegen", "-dir", dir, "-out", "gen.go"}, io.Discard); err == nil {
+			t.Error("expected an error writing over a directory")
 		}
 	})
 
@@ -876,7 +1015,7 @@ func TestLoadSkipsNonSourceFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := load(dir, testCodecPkg, false)
+	g, err := load(dir, "goserde_gen.go", testCodecPkg, false)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -888,7 +1027,7 @@ func TestLoadSkipsNonSourceFiles(t *testing.T) {
 
 // TestLoadParseError checks a syntactically invalid source file is reported.
 func TestLoadParseError(t *testing.T) {
-	if _, err := load(writePkg(t, "package f\nfunc {\n"), testCodecPkg, false); err == nil {
+	if _, err := load(writePkg(t, "package f\nfunc {\n"), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Error("expected a parse error")
 	}
 }
@@ -896,7 +1035,7 @@ func TestLoadParseError(t *testing.T) {
 // TestLoadTypeCheckError checks a file that parses but fails type-checking is
 // reported with the type-check prefix.
 func TestLoadTypeCheckError(t *testing.T) {
-	_, err := load(writePkg(t, "package f\n//goserde:generate\ntype T struct{ X Undefined }\n"), testCodecPkg, false)
+	_, err := load(writePkg(t, "package f\n//goserde:generate\ntype T struct{ X Undefined }\n"), "goserde_gen.go", testCodecPkg, false)
 	if err == nil || !strings.Contains(err.Error(), "type-check") {
 		t.Fatalf("got err=%v, want a type-check error", err)
 	}
@@ -904,7 +1043,7 @@ func TestLoadTypeCheckError(t *testing.T) {
 
 // TestLoadMissingDir checks a nonexistent directory is reported (ReadDir error).
 func TestLoadMissingDir(t *testing.T) {
-	if _, err := load(filepath.Join(t.TempDir(), "missing"), testCodecPkg, false); err == nil {
+	if _, err := load(filepath.Join(t.TempDir(), "missing"), "goserde_gen.go", testCodecPkg, false); err == nil {
 		t.Error("expected an error for a missing directory")
 	}
 }
