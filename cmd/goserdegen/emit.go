@@ -64,7 +64,7 @@ func (g *generator) generate() ([]byte, error) {
 			return nil, err
 		}
 
-		if !g.safe && g.blittable(fs) {
+		if !g.safe && g.blittable(t, fs) {
 			// Fixed-width struct: single memory copy (fastape/gencode-fixed tier).
 			// Safe mode skips this native-memory path for portable, field-by-field
 			// little-endian encoding (no unsafe, no memmove).
@@ -925,7 +925,7 @@ func (g *generator) blitElem(t types.Type) bool {
 
 	fs, err := g.fieldsOf(named)
 
-	return err == nil && g.blittable(fs)
+	return err == nil && g.blittable(named, fs)
 }
 
 // byteCount returns the emitted expression for count elements of esz bytes,
@@ -967,8 +967,14 @@ func isFixedWidth(t types.Type) bool {
 // them), so the whole struct can be copied as raw memory. Strings, slices,
 // pointers, and maps disqualify it. This is the trusted-bytes, same-arch fast
 // path that puts fixed structs in the ~sub-ns tier.
-func (g *generator) blittable(fs []field) bool {
-	if len(fs) == 0 {
+//
+// The serializable fields fs must also cover the entire struct t: the blit
+// codec memmoves the whole value, so a field skipped by fieldsOf (unexported
+// or tagged goserde:"-") would leak its bytes onto the wire and be overwritten
+// on decode, violating the exclusion contract. fieldsOf only ever drops
+// fields, so full coverage is exactly len(fs) == NumFields.
+func (g *generator) blittable(t *types.Named, fs []field) bool {
+	if len(fs) == 0 || len(fs) != t.Underlying().(*types.Struct).NumFields() {
 		return false
 	}
 

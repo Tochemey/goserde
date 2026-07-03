@@ -14,6 +14,14 @@ All notable changes to goserde are documented in this file. The format is based 
 - **Performance:** repeated decode into the same destination on the pointer-heavy `Nested` shape (Apple M1) drops from 36 ns / 32 B / 2 allocs to 14.6 ns / 0 allocs, about 2.5x. Fresh-destination decode is unchanged.
 - `codec.UvarintSize` is now branch-free via `bits.Len64` (same results, lower inlining cost). Benchmarks are unchanged; investigation confirmed the varint primitives all inline and are not a bottleneck.
 
+### Added
+
+- **Benchmark coverage and guardrails.** `benchcompare` now runs the mus and benc head-to-head across all five generated shapes (fixed-width, flat mixed, nested + pointer, map-heavy, string-heavy) in addition to `Record`, with round-trip tests keeping every hand-written competitor codec honest; goserde leads every cell, including map-heavy decode (README tables updated). The shape suite gains union round-trip and 1000-element map, string-slice, and struct-slice benchmarks. CI gains a report-only `bench-smoke` job that runs the shape benchmarks on a pull request's base and head and prints a `benchstat` comparison in the job summary, so perf regressions surface in review without a flaky hard gate.
+
+### Fixed
+
+- **Blittable structs no longer leak skipped fields onto the wire.** Since v0.1.0, a struct whose *serialized* fields were all fixed-width took the whole-struct memmove even when it also had an excluded (`goserde:"-"`) or unexported field, so the skipped field's raw bytes were written to the output (a potential secret leak) and overwritten on decode, violating the exclusion contract. The blit fast path now requires the serializable fields to cover the entire struct; partially covered structs, and slices/arrays of them, fall back to the correct field-by-field codec. Structs with every field exported and untagged (the common case) keep the memmove path, and the wire format changes only for the previously mis-encoded structs.
+
 ## [v0.1.0] - 2026-06-29
 
 First public release of goserde: a code-generated, zero-reflection binary serializer for Go, built for maximum encode/decode throughput when you own both ends of the wire.

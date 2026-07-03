@@ -160,6 +160,49 @@ type Fixed struct {
 	}
 }
 
+// TestGenerateBlitRequiresFullCoverage checks that a struct with a skipped
+// field (goserde:"-" or unexported) never takes the whole-struct memmove, even
+// when every serialized field is fixed-width: the blit would copy the skipped
+// field's bytes onto the wire and overwrite it on decode. Such structs, and
+// slices of them, must use the field-by-field codec.
+func TestGenerateBlitRequiresFullCoverage(t *testing.T) {
+	src := `package fixture
+
+//goserde:generate
+type Tagged struct {
+	A int64
+	B int64 ` + "`goserde:\"-\"`" + `
+}
+
+//goserde:generate
+type Hidden struct {
+	A int64
+	b int64
+}
+
+//goserde:generate
+type T struct {
+	Ts []Tagged
+	Hs []Hidden
+}
+`
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "unsafe.Sizeof(*r)") {
+		t.Errorf("structs with skipped fields must not take the whole-struct blit, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "r.B") {
+		t.Errorf("excluded field must never reach the wire, got:\n%s", out)
+	}
+
+	for _, sl := range []string{"r.Ts", "r.Hs"} {
+		if strings.Contains(out, "unsafe.Pointer(&"+sl+"[0])") {
+			t.Errorf("slice of partially-covered struct %s must not be bulk-copied, got:\n%s", sl, out)
+		}
+	}
+}
+
 // TestGenerateSafeMode checks safe mode emits bounds checks, copies length-
 // prefixed payloads, and avoids the unsafe memmove path.
 func TestGenerateSafeMode(t *testing.T) {
@@ -1490,6 +1533,77 @@ func BenchmarkCollection_U_Reuse(b *testing.B) {
 	v.Marshal(buf)
 
 	var o shapes.CollectionHeavy
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkUnion round-trips a tagged-union field plus a small slice of unions,
+// covering the tag switch on encode and the assert-or-allocate path on decode.
+func BenchmarkUnion_M(b *testing.B) {
+	v := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}}
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkUnion_U(b *testing.B) {
+	v := shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}}
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.Drawing
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkMap1k round-trips a 1000-entry map, scaling the codec's weakest
+// shape well past the tiny fixtures above.
+func mapSample1k() shapes.CollectionHeavy {
+	m := make(map[string]int64, 1000)
+
+	for i := range 1000 {
+		m[fmt.Sprintf("key-%04d", i)] = int64(i)
+	}
+
+	return shapes.CollectionHeavy{Counts: m}
+}
+
+func BenchmarkMap1k_M(b *testing.B) {
+	v := mapSample1k()
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkMap1k_U(b *testing.B) {
+	v := mapSample1k()
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.CollectionHeavy
+
+	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// BenchmarkStringSlice1k round-trips a 1000-element []string, the
+// variable-size element loop at scale (each decoded string aliases the input).
+func stringSample1k() shapes.StringHeavy {
+	tags := make([]string, 1000)
+
+	for i := range tags {
+		tags[i] = fmt.Sprintf("tag-%04d-abcdefghij", i)
+	}
+
+	return shapes.StringHeavy{Title: "big", Tags: tags}
+}
+
+func BenchmarkStringSlice1k_M(b *testing.B) {
+	v := stringSample1k()
+	benchM(b, v.Size, v.Marshal)
+}
+
+func BenchmarkStringSlice1k_U(b *testing.B) {
+	v := stringSample1k()
+	buf := make([]byte, v.Size())
+	v.Marshal(buf)
+
+	var o shapes.StringHeavy
 
 	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
 }
