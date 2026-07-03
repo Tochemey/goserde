@@ -168,6 +168,38 @@ func UvarintSize(v uint64) int {
 	return (bits.Len64(v|1) + 6) / 7
 }
 
+// AppendU16 appends v as 2 little-endian bytes to b and returns the extended
+// slice. The Append* primitives back the generated Append methods, which
+// encode without a prior Size pass.
+func AppendU16(b []byte, v uint16) []byte {
+	return append(b, byte(v), byte(v>>8))
+}
+
+// AppendU32 appends v as 4 little-endian bytes to b and returns the extended
+// slice.
+func AppendU32(b []byte, v uint32) []byte {
+	return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+// AppendU64 appends v as 8 little-endian bytes to b and returns the extended
+// slice.
+func AppendU64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
+
+// AppendUvarint appends v as an unsigned LEB128 varint to b and returns the
+// extended slice. The single-byte case exits on the first iteration.
+func AppendUvarint(b []byte, v uint64) []byte {
+	for v >= 0x80 {
+		b = append(b, byte(v)|0x80)
+		v >>= 7
+	}
+
+	return append(b, byte(v))
+}
+
 // Zig zigzag-encodes a signed integer so that small-magnitude values (positive
 // or negative) map to small unsigned values, which a varint then encodes
 // compactly. It is the inverse of [Zag].

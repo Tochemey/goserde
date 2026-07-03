@@ -24,6 +24,11 @@ func (r *Circle) Marshal(b []byte) int {
 	return n
 }
 
+// Append appends Circle as raw memory to b and returns the extended slice.
+func (r *Circle) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
+}
+
 // Unmarshal copies raw memory from b back into Circle.
 func (r *Circle) Unmarshal(b []byte) (int, error) {
 	n := int(unsafe.Sizeof(*r))
@@ -74,6 +79,28 @@ func (r *CollectionHeavy) Marshal(b []byte) int {
 	return i
 }
 
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *CollectionHeavy) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Counts)))
+	for e7, e8 := range r.Counts {
+		b = codec.AppendUvarint(b, uint64(len(e7)))
+		b = append(b, e7...)
+		b = codec.AppendU64(b, uint64(e8))
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Floats)))
+	if len(r.Floats) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Floats[0])), 8*len(r.Floats))...)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Names)))
+	for _, e9 := range r.Names {
+		b = codec.AppendUvarint(b, uint64(len(e9)))
+		b = append(b, e9...)
+	}
+	return b
+}
+
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
 // The returned error is always nil; truncated input may panic (fast mode).
 func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
@@ -87,22 +114,22 @@ func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
 	if nn == 0 {
 		r.Counts = nil
 	} else {
-		j7 := nn
+		j10 := nn
 		if r.Counts != nil {
 			clear(r.Counts)
 		} else {
-			r.Counts = make(map[string]int64, j7)
+			r.Counts = make(map[string]int64, j10)
 		}
-		for j8 := uint64(0); j8 < j7; j8++ {
-			var j9 string
-			var j10 int64
+		for j11 := uint64(0); j11 < j10; j11++ {
+			var j12 string
+			var j13 int64
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			j9 = codec.B2S(b[i : i+int(nn)])
+			j12 = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
-			j10 = int64(codec.U64(b[i:]))
+			j13 = int64(codec.U64(b[i:]))
 			i += 8
-			r.Counts[j9] = j10
+			r.Counts[j12] = j13
 		}
 	}
 	nn, cc = codec.Uvarint(b[i:])
@@ -128,10 +155,10 @@ func (r *CollectionHeavy) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Names = make([]string, nn)
 		}
-		for j11 := range r.Names {
+		for j14 := range r.Names {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			r.Names[j11] = codec.B2S(b[i : i+int(nn)])
+			r.Names[j14] = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
 		}
 	}
@@ -154,8 +181,8 @@ func (r *Drawing) Size() int {
 		panic("goserde: value is not a registered member of union Geometry")
 	}
 	s += codec.UvarintSize(uint64(len(r.Layers)))
-	for _, e12 := range r.Layers {
-		switch v := e12.(type) {
+	for _, e15 := range r.Layers {
+		switch v := e15.(type) {
 		case *Circle:
 			s += 1 + v.Size()
 		case *Square:
@@ -188,8 +215,8 @@ func (r *Drawing) Marshal(b []byte) int {
 		panic("goserde: value is not a registered member of union Geometry")
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Layers)))
-	for _, e13 := range r.Layers {
-		switch v := e13.(type) {
+	for _, e16 := range r.Layers {
+		switch v := e16.(type) {
 		case *Circle:
 			i += codec.PutUvarint(b[i:], 1)
 			i += v.Marshal(b[i:])
@@ -204,6 +231,42 @@ func (r *Drawing) Marshal(b []byte) int {
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *Drawing) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	switch v := r.Shape.(type) {
+	case *Circle:
+		b = codec.AppendUvarint(b, 1)
+		b = v.Append(b)
+	case *Square:
+		b = codec.AppendUvarint(b, 2)
+		b = v.Append(b)
+	case nil:
+		b = codec.AppendUvarint(b, 0)
+	default:
+		panic("goserde: value is not a registered member of union Geometry")
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Layers)))
+	for _, e17 := range r.Layers {
+		switch v := e17.(type) {
+		case *Circle:
+			b = codec.AppendUvarint(b, 1)
+			b = v.Append(b)
+		case *Square:
+			b = codec.AppendUvarint(b, 2)
+			b = v.Append(b)
+		case nil:
+			b = codec.AppendUvarint(b, 0)
+		default:
+			panic("goserde: value is not a registered member of union Geometry")
+		}
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -224,21 +287,21 @@ func (r *Drawing) Unmarshal(b []byte) (int, error) {
 	case 0:
 		r.Shape = nil
 	case 1:
-		j14, _ := r.Shape.(*Circle)
-		if j14 == nil {
-			j14 = new(Circle)
+		j18, _ := r.Shape.(*Circle)
+		if j18 == nil {
+			j18 = new(Circle)
 		}
-		nnn, _ := j14.Unmarshal(b[i:])
+		nnn, _ := j18.Unmarshal(b[i:])
 		i += nnn
-		r.Shape = j14
+		r.Shape = j18
 	case 2:
-		j15, _ := r.Shape.(*Square)
-		if j15 == nil {
-			j15 = new(Square)
+		j19, _ := r.Shape.(*Square)
+		if j19 == nil {
+			j19 = new(Square)
 		}
-		nnn, _ := j15.Unmarshal(b[i:])
+		nnn, _ := j19.Unmarshal(b[i:])
 		i += nnn
-		r.Shape = j15
+		r.Shape = j19
 	default:
 		return i, codec.ErrUnknownUnionTag
 	}
@@ -252,28 +315,28 @@ func (r *Drawing) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Layers = make([]Geometry, nn)
 		}
-		for j16 := range r.Layers {
+		for j20 := range r.Layers {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
 			switch nn {
 			case 0:
-				r.Layers[j16] = nil
+				r.Layers[j20] = nil
 			case 1:
-				j17, _ := r.Layers[j16].(*Circle)
-				if j17 == nil {
-					j17 = new(Circle)
+				j21, _ := r.Layers[j20].(*Circle)
+				if j21 == nil {
+					j21 = new(Circle)
 				}
-				nnn, _ := j17.Unmarshal(b[i:])
+				nnn, _ := j21.Unmarshal(b[i:])
 				i += nnn
-				r.Layers[j16] = j17
+				r.Layers[j20] = j21
 			case 2:
-				j18, _ := r.Layers[j16].(*Square)
-				if j18 == nil {
-					j18 = new(Square)
+				j22, _ := r.Layers[j20].(*Square)
+				if j22 == nil {
+					j22 = new(Square)
 				}
-				nnn, _ := j18.Unmarshal(b[i:])
+				nnn, _ := j22.Unmarshal(b[i:])
 				i += nnn
-				r.Layers[j16] = j18
+				r.Layers[j20] = j22
 			default:
 				return i, codec.ErrUnknownUnionTag
 			}
@@ -293,6 +356,11 @@ func (r *FixedArrays) Marshal(b []byte) int {
 	n := int(unsafe.Sizeof(*r))
 	copy(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), n))
 	return n
+}
+
+// Append appends FixedArrays as raw memory to b and returns the extended slice.
+func (r *FixedArrays) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
 }
 
 // Unmarshal copies raw memory from b back into FixedArrays.
@@ -327,6 +395,19 @@ func (r *FlatMixed) Marshal(b []byte) int {
 	i += copy(b[i:], r.Data)
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *FlatMixed) Append(b []byte) []byte {
+	b = codec.AppendU64(b, uint64(r.ID))
+	b = codec.AppendU64(b, codec.F64bits(r.Ratio))
+	b = codec.AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	b = codec.AppendUvarint(b, uint64(len(r.Data)))
+	b = append(b, r.Data...)
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -369,6 +450,11 @@ func (r *Inner) Marshal(b []byte) int {
 	return n
 }
 
+// Append appends Inner as raw memory to b and returns the extended slice.
+func (r *Inner) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
+}
+
 // Unmarshal copies raw memory from b back into Inner.
 func (r *Inner) Unmarshal(b []byte) (int, error) {
 	n := int(unsafe.Sizeof(*r))
@@ -380,8 +466,8 @@ func (r *Inner) Unmarshal(b []byte) (int, error) {
 func (r *MixedArrays) Size() int {
 	s := 0
 	s += codec.UvarintSize(uint64(len(r.Name))) + len(r.Name)
-	for j19 := 0; j19 < 3; j19++ {
-		s += codec.UvarintSize(uint64(len(r.Words[j19]))) + len(r.Words[j19])
+	for j23 := 0; j23 < 3; j23++ {
+		s += codec.UvarintSize(uint64(len(r.Words[j23]))) + len(r.Words[j23])
 	}
 	s += int(unsafe.Sizeof(r.Points))
 	s += 8
@@ -394,14 +480,29 @@ func (r *MixedArrays) Marshal(b []byte) int {
 	i := 0
 	i += codec.PutUvarint(b[i:], uint64(len(r.Name)))
 	i += copy(b[i:], codec.S2B(r.Name))
-	for j20 := 0; j20 < 3; j20++ {
-		i += codec.PutUvarint(b[i:], uint64(len(r.Words[j20])))
-		i += copy(b[i:], codec.S2B(r.Words[j20]))
+	for j24 := 0; j24 < 3; j24++ {
+		i += codec.PutUvarint(b[i:], uint64(len(r.Words[j24])))
+		i += copy(b[i:], codec.S2B(r.Words[j24]))
 	}
 	i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Points[0])), int(unsafe.Sizeof(r.Points))))
 	i += copy(b[i:], r.Bytes[:])
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *MixedArrays) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	for j25 := 0; j25 < 3; j25++ {
+		b = codec.AppendUvarint(b, uint64(len(r.Words[j25])))
+		b = append(b, r.Words[j25]...)
+	}
+	b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Points[0])), int(unsafe.Sizeof(r.Points)))...)
+	b = append(b, r.Bytes[:]...)
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -416,15 +517,15 @@ func (r *MixedArrays) Unmarshal(b []byte) (int, error) {
 	i += cc
 	r.Name = codec.B2S(b[i : i+int(nn)])
 	i += int(nn)
-	for j21 := 0; j21 < 3; j21++ {
+	for j26 := 0; j26 < 3; j26++ {
 		nn, cc = codec.Uvarint(b[i:])
 		i += cc
-		r.Words[j21] = codec.B2S(b[i : i+int(nn)])
+		r.Words[j26] = codec.B2S(b[i : i+int(nn)])
 		i += int(nn)
 	}
-	j22 := int(unsafe.Sizeof(r.Points))
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Points[0])), j22), b[i:i+j22])
-	i += j22
+	j27 := int(unsafe.Sizeof(r.Points))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Points[0])), j27), b[i:i+j27])
+	i += j27
 	copy(r.Bytes[:], b[i:i+8])
 	i += 8
 	_ = codec.U64
@@ -441,6 +542,11 @@ func (r *NamedFixed) Marshal(b []byte) int {
 	n := int(unsafe.Sizeof(*r))
 	copy(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), n))
 	return n
+}
+
+// Append appends NamedFixed as raw memory to b and returns the extended slice.
+func (r *NamedFixed) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
 }
 
 // Unmarshal copies raw memory from b back into NamedFixed.
@@ -492,6 +598,30 @@ func (r *NamedScalars) Marshal(b []byte) int {
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *NamedScalars) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Label)))
+	b = append(b, r.Label...)
+	b = codec.AppendUvarint(b, uint64(len(r.Palette)))
+	if len(r.Palette) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Palette[0])), len(r.Palette))...)
+	}
+	b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Swatch[0])), 4)...)
+	b = codec.AppendUvarint(b, uint64(len(r.Levels)))
+	if len(r.Levels) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Levels[0])), 4*len(r.Levels))...)
+	}
+	if r.Accent != nil {
+		b = append(b, 1)
+		b = append(b, byte((*r.Accent)))
+	} else {
+		b = append(b, 0)
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -586,6 +716,26 @@ func (r *Nested) Marshal(b []byte) int {
 	return i
 }
 
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *Nested) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Label)))
+	b = append(b, r.Label...)
+	b = (&r.Pos).Append(b)
+	if r.Opt != nil {
+		b = append(b, 1)
+		b = r.Opt.Append(b)
+	} else {
+		b = append(b, 0)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Path)))
+	if len(r.Path) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Path[0])), int(unsafe.Sizeof(r.Path[0]))*len(r.Path))...)
+	}
+	return b
+}
+
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
 // The returned error is always nil; truncated input may panic (fast mode).
 func (r *Nested) Unmarshal(b []byte) (int, error) {
@@ -625,9 +775,9 @@ func (r *Nested) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Path = make([]Inner, nn)
 		}
-		j23 := int(unsafe.Sizeof(r.Path[0])) * int(nn)
-		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Path[0])), j23), b[i:i+j23])
-		i += j23
+		j28 := int(unsafe.Sizeof(r.Path[0])) * int(nn)
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&r.Path[0])), j28), b[i:i+j28])
+		i += j28
 	}
 	_ = codec.U64
 	return i, nil
@@ -663,12 +813,34 @@ func (r *NumericBulk) Marshal(b []byte) int {
 	}
 	i += copy(b[i:], unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Ints)))
-	for _, e24 := range r.Ints {
-		codec.PutU64(b[i:], uint64(e24))
+	for _, e29 := range r.Ints {
+		codec.PutU64(b[i:], uint64(e29))
 		i += 8
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *NumericBulk) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Label)))
+	b = append(b, r.Label...)
+	b = codec.AppendUvarint(b, uint64(len(r.U16s)))
+	if len(r.U16s) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.U16s[0])), 2*len(r.U16s))...)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.F64s)))
+	if len(r.F64s) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.F64s[0])), 8*len(r.F64s))...)
+	}
+	b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Quad[0])), 16)...)
+	b = codec.AppendUvarint(b, uint64(len(r.Ints)))
+	for _, e30 := range r.Ints {
+		b = codec.AppendU64(b, uint64(e30))
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -721,8 +893,8 @@ func (r *NumericBulk) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Ints = make([]int, nn)
 		}
-		for j25 := range r.Ints {
-			r.Ints[j25] = int(codec.U64(b[i:]))
+		for j31 := range r.Ints {
+			r.Ints[j31] = int(codec.U64(b[i:]))
 			i += 8
 		}
 	}
@@ -740,6 +912,11 @@ func (r *SmallFixed) Marshal(b []byte) int {
 	n := int(unsafe.Sizeof(*r))
 	copy(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), n))
 	return n
+}
+
+// Append appends SmallFixed as raw memory to b and returns the extended slice.
+func (r *SmallFixed) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
 }
 
 // Unmarshal copies raw memory from b back into SmallFixed.
@@ -761,6 +938,11 @@ func (r *Square) Marshal(b []byte) int {
 	return n
 }
 
+// Append appends Square as raw memory to b and returns the extended slice.
+func (r *Square) Append(b []byte) []byte {
+	return append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)
+}
+
 // Unmarshal copies raw memory from b back into Square.
 func (r *Square) Unmarshal(b []byte) (int, error) {
 	n := int(unsafe.Sizeof(*r))
@@ -774,8 +956,8 @@ func (r *StringHeavy) Size() int {
 	s += codec.UvarintSize(uint64(len(r.Title))) + len(r.Title)
 	s += codec.UvarintSize(uint64(len(r.Body))) + len(r.Body)
 	s += codec.UvarintSize(uint64(len(r.Tags)))
-	for _, e26 := range r.Tags {
-		s += codec.UvarintSize(uint64(len(e26))) + len(e26)
+	for _, e32 := range r.Tags {
+		s += codec.UvarintSize(uint64(len(e32))) + len(e32)
 	}
 	return s
 }
@@ -789,12 +971,28 @@ func (r *StringHeavy) Marshal(b []byte) int {
 	i += codec.PutUvarint(b[i:], uint64(len(r.Body)))
 	i += copy(b[i:], codec.S2B(r.Body))
 	i += codec.PutUvarint(b[i:], uint64(len(r.Tags)))
-	for _, e27 := range r.Tags {
-		i += codec.PutUvarint(b[i:], uint64(len(e27)))
-		i += copy(b[i:], codec.S2B(e27))
+	for _, e33 := range r.Tags {
+		i += codec.PutUvarint(b[i:], uint64(len(e33)))
+		i += copy(b[i:], codec.S2B(e33))
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *StringHeavy) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Title)))
+	b = append(b, r.Title...)
+	b = codec.AppendUvarint(b, uint64(len(r.Body)))
+	b = append(b, r.Body...)
+	b = codec.AppendUvarint(b, uint64(len(r.Tags)))
+	for _, e34 := range r.Tags {
+		b = codec.AppendUvarint(b, uint64(len(e34)))
+		b = append(b, e34...)
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -823,10 +1021,10 @@ func (r *StringHeavy) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Tags = make([]string, nn)
 		}
-		for j28 := range r.Tags {
+		for j35 := range r.Tags {
 			nn, cc = codec.Uvarint(b[i:])
 			i += cc
-			r.Tags[j28] = codec.B2S(b[i : i+int(nn)])
+			r.Tags[j35] = codec.B2S(b[i : i+int(nn)])
 			i += int(nn)
 		}
 	}
@@ -852,6 +1050,16 @@ func (r *Tagged) Marshal(b []byte) int {
 	i += copy(b[i:], codec.S2B(r.Name))
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *Tagged) Append(b []byte) []byte {
+	b = codec.AppendU64(b, uint64(r.ID))
+	b = codec.AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -904,12 +1112,32 @@ func (r *TimeStruct) Marshal(b []byte) int {
 		i++
 	}
 	i += codec.PutUvarint(b[i:], uint64(len(r.Stamps)))
-	for j29 := range r.Stamps {
-		codec.PutU64(b[i:], uint64(r.Stamps[j29].UnixNano()))
+	for j36 := range r.Stamps {
+		codec.PutU64(b[i:], uint64(r.Stamps[j36].UnixNano()))
 		i += 8
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *TimeStruct) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Label)))
+	b = append(b, r.Label...)
+	b = codec.AppendU64(b, uint64(r.Created.UnixNano()))
+	if r.Updated != nil {
+		b = append(b, 1)
+		b = codec.AppendU64(b, uint64((*r.Updated).UnixNano()))
+	} else {
+		b = append(b, 0)
+	}
+	b = codec.AppendUvarint(b, uint64(len(r.Stamps)))
+	for j37 := range r.Stamps {
+		b = codec.AppendU64(b, uint64(r.Stamps[j37].UnixNano()))
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -947,8 +1175,8 @@ func (r *TimeStruct) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Stamps = make([]time.Time, nn)
 		}
-		for j30 := range r.Stamps {
-			r.Stamps[j30] = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
+		for j38 := range r.Stamps {
+			r.Stamps[j38] = time.Unix(0, int64(codec.U64(b[i:]))).UTC()
 			i += 8
 		}
 	}
@@ -990,6 +1218,21 @@ func (r *WideItem) Marshal(b []byte) int {
 	return i
 }
 
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *WideItem) Append(b []byte) []byte {
+	b = codec.AppendU64(b, uint64(r.ID))
+	b = codec.AppendU64(b, codec.F64bits(r.A))
+	b = codec.AppendU64(b, codec.F64bits(r.B))
+	b = codec.AppendU64(b, codec.F64bits(r.C))
+	b = codec.AppendU64(b, codec.F64bits(r.D))
+	b = append(b, r.Blob[:]...)
+	b = codec.AppendUvarint(b, uint64(len(r.Note)))
+	b = append(b, r.Note...)
+	return b
+}
+
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
 // The returned error is always nil; truncated input may panic (fast mode).
 func (r *WideItem) Unmarshal(b []byte) (int, error) {
@@ -1022,8 +1265,8 @@ func (r *WideItem) Unmarshal(b []byte) (int, error) {
 func (r *WideList) Size() int {
 	s := 0
 	s += codec.UvarintSize(uint64(len(r.Items)))
-	for j31 := range r.Items {
-		s += (&r.Items[j31]).Size()
+	for j39 := range r.Items {
+		s += (&r.Items[j39]).Size()
 	}
 	return s
 }
@@ -1033,11 +1276,22 @@ func (r *WideList) Size() int {
 func (r *WideList) Marshal(b []byte) int {
 	i := 0
 	i += codec.PutUvarint(b[i:], uint64(len(r.Items)))
-	for j32 := range r.Items {
-		i += (&r.Items[j32]).Marshal(b[i:])
+	for j40 := range r.Items {
+		i += (&r.Items[j40]).Marshal(b[i:])
 	}
 	_ = codec.PutU64
 	return i
+}
+
+// Append appends the receiver's encoding to b, growing it as needed, and
+// returns the extended slice. It writes the same bytes as Marshal without
+// needing a Size() pass first.
+func (r *WideList) Append(b []byte) []byte {
+	b = codec.AppendUvarint(b, uint64(len(r.Items)))
+	for j41 := range r.Items {
+		b = (&r.Items[j41]).Append(b)
+	}
+	return b
 }
 
 // Unmarshal decodes the receiver from b and returns the number of bytes consumed.
@@ -1058,9 +1312,9 @@ func (r *WideList) Unmarshal(b []byte) (int, error) {
 		} else {
 			r.Items = make([]WideItem, nn)
 		}
-		for j33 := range r.Items {
+		for j42 := range r.Items {
 			{
-				nnn, _ := (&r.Items[j33]).Unmarshal(b[i:])
+				nnn, _ := (&r.Items[j42]).Unmarshal(b[i:])
 				i += nnn
 			}
 		}

@@ -23,6 +23,7 @@
 package codec
 
 import (
+	"bytes"
 	"math"
 	"testing"
 )
@@ -104,6 +105,40 @@ func TestUvarintRoundTrip(t *testing.T) {
 		got, c := Uvarint(buf)
 		if got != v || c != n {
 			t.Errorf("v=%d: Uvarint=(%d,%d), want (%d,%d)", v, got, c, v, n)
+		}
+	}
+}
+
+// TestAppendPrimitives checks each Append* primitive writes exactly the bytes
+// its Put* counterpart does, appended after any existing content.
+func TestAppendPrimitives(t *testing.T) {
+	prefix := []byte{0xEE}
+
+	fixed := make([]byte, 8)
+
+	PutU16(fixed, 0xBEEF)
+	if got := AppendU16(prefix, 0xBEEF); !bytes.Equal(got, append([]byte{0xEE}, fixed[:2]...)) {
+		t.Errorf("AppendU16 = %x", got)
+	}
+
+	PutU32(fixed, 0xDEADBEEF)
+	if got := AppendU32(prefix, 0xDEADBEEF); !bytes.Equal(got, append([]byte{0xEE}, fixed[:4]...)) {
+		t.Errorf("AppendU32 = %x", got)
+	}
+
+	PutU64(fixed, 0xCAFEBABEDEADBEEF)
+	if got := AppendU64(prefix, 0xCAFEBABEDEADBEEF); !bytes.Equal(got, append([]byte{0xEE}, fixed...)) {
+		t.Errorf("AppendU64 = %x", got)
+	}
+
+	vals := []uint64{0, 1, 127, 128, 300, 1 << 21, 1 << 42, math.MaxUint64}
+	buf := make([]byte, 10)
+
+	for _, v := range vals {
+		n := PutUvarint(buf, v)
+
+		if got := AppendUvarint(nil, v); !bytes.Equal(got, buf[:n]) {
+			t.Errorf("v=%d: AppendUvarint=%x, PutUvarint wrote %x", v, got, buf[:n])
 		}
 	}
 }

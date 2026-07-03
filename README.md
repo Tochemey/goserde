@@ -8,8 +8,8 @@
 A code-generated, zero-reflection binary serializer for Go, built for maximum
 encode/decode throughput when you own both ends of the wire.
 
-goserde generates type-specific `Size`/`Marshal`/`Unmarshal` methods for your
-structs at build time. There is no reflection on the hot path, no schema
+goserde generates type-specific `Size`/`Marshal`/`Append`/`Unmarshal` methods
+for your structs at build time. There is no reflection on the hot path, no schema
 language, and no runtime type registry: just straight-line Go over a single
 running offset, with inlinable primitives and zero-copy decoding.
 
@@ -89,7 +89,7 @@ On the hot path, drive the generated methods directly and reuse buffers to stay
 allocation-free:
 
 ```go
-buf = codec.Into(u, buf) // reuses buf when it has capacity, else allocates
+buf = codec.Into(u, buf) // single-pass append encode; reuses buf's capacity
 
 var out User
 out.Unmarshal(data)        // returns (bytesRead int, err error)
@@ -265,6 +265,14 @@ over it, and (as with `encoding/json`) its pointer fields and union members
 must not alias each other, since every aliased slot decodes through the one
 shared pointee.
 
+**Encode without the Size pass:** `codec.Into` encodes through the generated
+`Append` method, a single tree walk that grows the buffer as it goes, instead
+of the two-pass `Size()`-then-`Marshal`. On a reused buffer that makes the
+map-heavy shape **124 -> 79 ns (-36%)**, nested **13.6 -> 8.8 ns (-35%)**, and
+string-heavy **23.5 -> 19.6 ns (-17%)**: encoding into a reused buffer now
+costs the same as the bare Marshal pass. `codec.Bytes` keeps the two-pass form
+deliberately, since one exactly sized allocation is optimal for one-shot use.
+
 Fixed and flat structs are where goserde dominates. Map-heavy decode is its
 weakest shape in absolute terms, though still ahead of mus and benc (see the
 table above); destination reuse is what makes it cheap in a loop.
@@ -290,11 +298,12 @@ until 1.0.0. From 1.0.0 onward the following semantic-versioning promise applies
 **Covered by SemVer (stable within a major version):**
 
 - The generated method set on your types: `Size() int`, `Marshal([]byte) int`,
-  and `Unmarshal([]byte) (int, error)`.
+  `Append([]byte) []byte`, and `Unmarshal([]byte) (int, error)`.
 - The full `codec` package: the convenience API (`Bytes`, `Into`, `From`, and
   the `Marshaler` / `Unmarshaler` interfaces) and the low-level encoding
-  primitives (`PutU32`/`U32` and friends, `PutUvarint`/`Uvarint`/`UvarintSize`,
-  `Zig`/`Zag`, `B2S`/`S2B`, the float bit-casts) you can use to hand-write a
+  primitives (`PutU32`/`U32` and friends, the `AppendU32`/`AppendUvarint`
+  append family, `PutUvarint`/`Uvarint`/`UvarintSize`, `Zig`/`Zag`, `B2S`/`S2B`,
+  the float bit-casts) you can use to hand-write a
   codec instead of running the generator. Generated and hand-written codecs call
   the same primitives, so they share an identical wire format.
 - The generator directives `//goserde:generate` and `//goserde:union`, and the

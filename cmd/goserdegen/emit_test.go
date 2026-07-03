@@ -160,6 +160,58 @@ type Fixed struct {
 	}
 }
 
+// TestAppendMatchesMarshal checks the single-pass Append method against the
+// two-pass Size+Marshal on every shape, in both modes: identical bytes, and an
+// existing prefix is preserved rather than overwritten.
+func TestAppendMatchesMarshal(t *testing.T) {
+	accent := shapes.Hue(200)
+	now := time.Unix(0, 1719858000000000000).UTC()
+
+	// Byte-for-byte comparison needs deterministic output, so maps are pinned
+	// to a single entry: iteration order would legitimately differ between the
+	// Marshal and Append walks.
+	all := sampleAll()
+	all.Scores = map[string]int32{"x": 1}
+
+	for _, m := range []codec.Marshaler{
+		&shapes.SmallFixed{A: -5, B: 99, C: 2.71828, D: true},
+		&shapes.FlatMixed{ID: 1 << 40, Ratio: 0.5, Name: "flat", Data: []byte("xyz")},
+		&shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &shapes.Inner{X: 7, Y: 8}, Path: []shapes.Inner{{X: 3, Y: 4}}},
+		&shapes.Nested{Label: "nil"},
+		&shapes.CollectionHeavy{Counts: map[string]int64{"a": 1}, Floats: []float64{1.5}, Names: []string{"x", "y"}},
+		&shapes.StringHeavy{Title: "T", Body: "lorem ipsum", Tags: []string{"go", "fast"}},
+		&shapes.TimeStruct{Label: "t", Created: now, Updated: &now, Stamps: []time.Time{now, now.Add(time.Hour)}},
+		&shapes.FixedArrays{Hash: [16]byte{1, 2, 3}, Quad: [4]int32{9, -8, 7, -6}, Flag: true},
+		&shapes.MixedArrays{Name: "m", Words: [3]string{"a", "bb", "ccc"}, Points: [2]shapes.Inner{{X: 1, Y: 2}, {X: 3, Y: 4}}, Bytes: [8]byte{5}},
+		&shapes.NumericBulk{Label: "bulk", U16s: []uint16{1, 65535}, F64s: []float64{-1.5}, Quad: [4]uint32{1, 2, 3, 4}, Ints: []int{-9, 1 << 40}},
+		&shapes.NamedScalars{Label: "named", Palette: []shapes.Hue{1, 2}, Swatch: [4]shapes.Hue{9, 8, 7, 6}, Levels: []shapes.Grade{-1, 5}, Accent: &accent},
+		&shapes.NamedFixed{Tag: 3, Codes: [3]shapes.Hue{1, 2, 3}, Score: -42, Flag: true},
+		&shapes.Drawing{Name: "d", Shape: &shapes.Circle{R: 2.5}, Layers: []shapes.Geometry{&shapes.Circle{R: 1}, &shapes.Square{Side: 3}}},
+		&shapes.Drawing{Name: "nil"},
+		&shapes.WideList{Items: []shapes.WideItem{{ID: 1, A: 1.5, Blob: [32]byte{9}, Note: "w"}}},
+		&shapes.Tagged{ID: 7, Name: "kept"},
+		all, // safe mode: every safeshapes type in one value
+	} {
+		want := codec.Bytes(m)
+
+		got := m.Append(nil)
+		if !bytes.Equal(got, want) {
+			t.Errorf("%T: Append bytes differ from Marshal:\n append=%x\nmarshal=%x", m, got, want)
+		}
+
+		prefix := []byte{0xAA, 0xBB, 0xCC}
+		got = m.Append(prefix)
+
+		if !bytes.Equal(got[:3], prefix) {
+			t.Errorf("%T: Append overwrote the existing prefix", m)
+		}
+
+		if !bytes.Equal(got[3:], want) {
+			t.Errorf("%T: Append after prefix differs from Marshal", m)
+		}
+	}
+}
+
 // TestGenerateTimeNotBlittable checks that a time.Time field keeps an
 // otherwise fixed-width struct off the whole-struct memmove: time encodes as
 // UnixNano, not raw memory, so the struct must use the field-by-field codec.
@@ -1560,6 +1612,33 @@ func BenchmarkCollection_U_Reuse(b *testing.B) {
 	var o shapes.CollectionHeavy
 
 	benchU(b, buf, func(x []byte) { o.Unmarshal(x) })
+}
+
+// benchInto benchmarks codec.Into with a reused buffer: the single-pass Append
+// encode, the steady-state write-loop pattern.
+func benchInto(b *testing.B, m codec.Marshaler) {
+	buf := make([]byte, 0, m.Size())
+	b.ReportAllocs()
+
+	for b.Loop() {
+		buf = codec.Into(m, buf)
+	}
+}
+
+func BenchmarkNested_Into(b *testing.B) {
+	in := shapes.Inner{X: 7, Y: 8}
+	v := shapes.Nested{Label: "n", Pos: shapes.Inner{X: 1, Y: 2}, Opt: &in, Path: []shapes.Inner{{X: 3, Y: 4}, {X: 5, Y: 6}, {X: 7, Y: 8}}}
+	benchInto(b, &v)
+}
+
+func BenchmarkCollection_Into(b *testing.B) {
+	v := shapes.CollectionHeavy{Counts: map[string]int64{"a": 1, "b": 2, "c": 3, "d": 4}, Floats: []float64{1, 2, 3, 4, 5}, Names: []string{"x", "y", "z"}}
+	benchInto(b, &v)
+}
+
+func BenchmarkStringHeavy_Into(b *testing.B) {
+	v := shapes.StringHeavy{Title: "Title", Body: "lorem ipsum dolor sit amet consectetur", Tags: []string{"go", "fast", "serde"}}
+	benchInto(b, &v)
 }
 
 // BenchmarkUnion round-trips a tagged-union field plus a small slice of unions,

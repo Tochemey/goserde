@@ -78,6 +78,32 @@ func (r *Record) Marshal(b []byte) int {
 	return i
 }
 
+// Append appends the record's encoding to b, growing it as needed, and returns
+// the extended slice. It writes the same bytes as Marshal in a single tree
+// walk, with no Size pass.
+func (r *Record) Append(b []byte) []byte {
+	b = AppendU64(b, r.ID)
+	b = AppendU64(b, f64bits(r.Score))
+
+	if r.Active {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+
+	b = AppendUvarint(b, uint64(len(r.Name)))
+	b = append(b, r.Name...)
+	b = AppendUvarint(b, uint64(len(r.Tags)))
+
+	if len(r.Tags) > 0 {
+		b = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&r.Tags[0])), 4*len(r.Tags))...)
+	}
+
+	b = AppendUvarint(b, uint64(len(r.Blob)))
+	b = append(b, r.Blob...)
+	return b
+}
+
 // Unmarshal reads the record back from b in the same order Marshal wrote it and
 // returns the number of bytes consumed. Name and Blob alias b (zero-copy), so
 // the caller must copy them if it needs ownership independent of b's lifetime.

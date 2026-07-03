@@ -70,6 +70,7 @@ func (g *generator) generate() ([]byte, error) {
 			// little-endian encoding (no unsafe, no memmove).
 			g.emitBlitSize(&b, t)
 			g.emitBlitMarshal(&b, t)
+			g.emitBlitAppend(&b, t)
 			g.emitBlitUnmarshal(&b, t)
 			g.usedUnsafe = true
 			continue
@@ -77,6 +78,7 @@ func (g *generator) generate() ([]byte, error) {
 
 		g.emitSize(&b, t, fs)
 		g.emitMarshal(&b, t, fs)
+		g.emitAppend(&b, t, fs)
 		g.emitUnmarshal(&b, t, fs)
 	}
 
@@ -483,6 +485,148 @@ func (g *generator) marshalExpr(b *bytes.Buffer, ref string, t types.Type) {
 		}
 
 		emitf(b, "\tcase nil:\n\t\ti += %s.PutUvarint(b[i:], 0)\n", q)
+		emitf(b, "\tdefault:\n\t\tpanic(%q)\n\t}\n", unionPanic(g, t))
+	}
+}
+
+// emitAppend writes the Append method for t: the same encoding as Marshal, but
+// growing the destination as it goes instead of requiring a Size()-sized
+// buffer. It is what lets codec.Into encode in a single tree walk.
+func (g *generator) emitAppend(b *bytes.Buffer, t *types.Named, fs []field) {
+	recv := t.Obj().Name()
+
+	emitf(b, "// Append appends the receiver's encoding to b, growing it as needed, and\n")
+	emitf(b, "// returns the extended slice. It writes the same bytes as Marshal without\n")
+	emitf(b, "// needing a Size() pass first.\n")
+	emitf(b, "func (r *%s) Append(b []byte) []byte {\n", recv)
+
+	for _, f := range fs {
+		g.appendExpr(b, "r."+f.name, f.typ)
+	}
+
+	emitf(b, "\treturn b\n}\n\n")
+}
+
+// appendExpr writes code that appends the encoding of the value ref of type t
+// to the slice b. It mirrors marshalExpr case for case; the wire bytes are
+// identical, only the destination management differs.
+func (g *generator) appendExpr(b *bytes.Buffer, ref string, t types.Type) {
+	q := g.codecQual
+
+	if isTime(t) {
+		g.usedTime = true
+		emitf(b, "\tb = %s.AppendU64(b, uint64(%s.UnixNano()))\n", q, ref)
+		return
+	}
+
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.Bool:
+			emitf(b, "\tif %s {\n\t\tb = append(b, 1)\n\t} else {\n\t\tb = append(b, 0)\n\t}\n", ref)
+		case types.Uint8, types.Int8:
+			emitf(b, "\tb = append(b, byte(%s))\n", ref)
+		case types.Uint16, types.Int16:
+			emitf(b, "\tb = %s.AppendU16(b, uint16(%s))\n", q, ref)
+		case types.Uint32, types.Int32:
+			emitf(b, "\tb = %s.AppendU32(b, uint32(%s))\n", q, ref)
+		case types.Float32:
+			emitf(b, "\tb = %s.AppendU32(b, %s.F32bits(%s))\n", q, q, ref)
+		case types.Uint64, types.Uint, types.Int64, types.Int:
+			emitf(b, "\tb = %s.AppendU64(b, uint64(%s))\n", q, ref)
+		case types.Float64:
+			emitf(b, "\tb = %s.AppendU64(b, %s.F64bits(%s))\n", q, q, ref)
+		case types.String:
+			emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+			emitf(b, "\tb = append(b, %s...)\n", ref)
+		}
+	case *types.Slice:
+		emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+
+		if isBytes(u) {
+			emitf(b, "\tb = append(b, %s...)\n", ref)
+			return
+		}
+
+		if !g.safe && memCopyable(u.Elem()) {
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %s)...)\n", ref, byteCount(esz, fmt.Sprintf("len(%s)", ref)))
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if g.blitElem(u.Elem()) {
+			g.usedUnsafe = true
+			emitf(b, "\tif len(%s) > 0 {\n", ref)
+			emitf(b, "\t\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s[0]))*len(%s))...)\n", ref, ref, ref)
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		if indexElems(u.Elem()) {
+			iv := freshIdx()
+			emitf(b, "\tfor %s := range %s {\n", iv, ref)
+			g.appendExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+			emitf(b, "\t}\n")
+
+			return
+		}
+
+		iv := freshVar()
+		emitf(b, "\tfor _, %s := range %s {\n", iv, ref)
+		g.appendExpr(b, iv, u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Array:
+		if isByteArray(u) {
+			emitf(b, "\tb = append(b, %s[:]...)\n", ref)
+			return
+		}
+
+		if !g.safe && u.Len() > 0 && memCopyable(u.Elem()) {
+			esz, _ := fixedSize(u.Elem())
+			g.usedUnsafe = true
+			emitf(b, "\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), %d)...)\n", ref, int(u.Len())*esz)
+
+			return
+		}
+
+		if u.Len() > 0 && g.blitElem(u.Elem()) {
+			g.usedUnsafe = true
+			emitf(b, "\tb = append(b, unsafe.Slice((*byte)(unsafe.Pointer(&%s[0])), int(unsafe.Sizeof(%s)))...)\n", ref, ref)
+
+			return
+		}
+
+		iv := freshIdx()
+		emitf(b, "\tfor %s := 0; %s < %d; %s++ {\n", iv, iv, u.Len(), iv)
+		g.appendExpr(b, fmt.Sprintf("%s[%s]", ref, iv), u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Pointer:
+		emitf(b, "\tif %s != nil {\n\t\tb = append(b, 1)\n", ref)
+		g.appendExpr(b, "(*"+ref+")", u.Elem())
+		emitf(b, "\t} else {\n\t\tb = append(b, 0)\n\t}\n")
+	case *types.Map:
+		emitf(b, "\tb = %s.AppendUvarint(b, uint64(len(%s)))\n", q, ref)
+		kv, vv := freshVar(), freshVar()
+		emitf(b, "\tfor %s, %s := range %s {\n", kv, vv, ref)
+		g.appendExpr(b, kv, u.Key())
+		g.appendExpr(b, vv, u.Elem())
+		emitf(b, "\t}\n")
+	case *types.Struct:
+		emitf(b, "\tb = %s.Append(b)\n", addrOf(ref))
+	case *types.Interface:
+		members, _ := g.unionMembersOf(t)
+		emitf(b, "\tswitch v := %s.(type) {\n", ref)
+
+		for idx, m := range members {
+			emitf(b, "\tcase *%s:\n\t\tb = %s.AppendUvarint(b, %d)\n\t\tb = v.Append(b)\n", types.TypeString(m, relativeTo(g)), q, idx+1)
+		}
+
+		emitf(b, "\tcase nil:\n\t\tb = %s.AppendUvarint(b, 0)\n", q)
 		emitf(b, "\tdefault:\n\t\tpanic(%q)\n\t}\n", unionPanic(g, t))
 	}
 }
@@ -1006,6 +1150,16 @@ func (g *generator) emitBlitMarshal(b *bytes.Buffer, t *types.Named) {
 	emitf(b, "\tn := int(unsafe.Sizeof(*r))\n")
 	emitf(b, "\tcopy(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), n))\n")
 	emitf(b, "\treturn n\n}\n\n")
+}
+
+// emitBlitAppend writes the Append method for a blittable struct: a single
+// raw-memory append of the receiver.
+func (g *generator) emitBlitAppend(b *bytes.Buffer, t *types.Named) {
+	recv := t.Obj().Name()
+
+	emitf(b, "// Append appends %s as raw memory to b and returns the extended slice.\n", recv)
+	emitf(b, "func (r *%s) Append(b []byte) []byte {\n", recv)
+	emitf(b, "\treturn append(b, unsafe.Slice((*byte)(unsafe.Pointer(r)), int(unsafe.Sizeof(*r)))...)\n}\n\n")
 }
 
 // emitBlitUnmarshal writes the Unmarshal method for a blittable struct: a single
