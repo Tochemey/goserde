@@ -1,4 +1,4 @@
-# goSerde
+# goserde
 
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/tochemey/goserde/ci.yml)](https://github.com/tochemey/goserde/actions/workflows/ci.yml)
 [![codecov](https://img.shields.io/codecov/c/github/tochemey/goserde?branch=main)](https://codecov.io/gh/tochemey/goserde)
@@ -222,7 +222,7 @@ goserde's lead is shape-dependent. Marshal is zero-alloc on every shape:
 |---------------------|---------|-----------|---------------|--------------------------------|
 | Fixed-width (4 fld) | 2.4 ns  | 2.4 ns    | 0             | single memmove (blittable)     |
 | Flat + string/bytes | 7.1 ns  | 6.3 ns    | 0             | zero-copy `string`/`[]byte`    |
-| String-heavy        | 19.6 ns | 33.0 ns   | 1             | `[]string` must allocate       |
+| String-heavy        | 19.6 ns | 32.0 ns   | 1             | `[]string` must allocate       |
 | Nested + pointers   | 12.3 ns | 32.0 ns   | 2             | pointer + slice-of-struct      |
 | Map-heavy           | 78.7 ns | 149.8 ns  | 4             | `make(map)` + per-entry insert |
 

@@ -99,7 +99,7 @@ var osExit = os.Exit
 // release tag: the release workflow fails a tag push whose name differs from
 // this value, and the generate-drift check keeps committed output in sync. Bump
 // it (and regenerate) as part of cutting a release.
-const version = "v0.1.0"
+const version = "v0.2.0"
 
 // main runs the generator and, on error, reports it to stderr with the tool
 // prefix and exits non-zero. The stderr write cannot be acted on, so its error
