@@ -160,6 +160,31 @@ type Fixed struct {
 	}
 }
 
+// TestGenerateTimeNotBlittable checks that a time.Time field keeps an
+// otherwise fixed-width struct off the whole-struct memmove: time encodes as
+// UnixNano, not raw memory, so the struct must use the field-by-field codec.
+func TestGenerateTimeNotBlittable(t *testing.T) {
+	src := `package fixture
+
+import "time"
+
+//goserde:generate
+type Timed struct {
+	A int64
+	T time.Time
+}
+`
+	out := genFixture(t, src, false)
+
+	if strings.Contains(out, "unsafe.Sizeof(*r)") {
+		t.Errorf("struct with a time.Time field must not take the blit path, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "UnixNano") {
+		t.Errorf("time.Time field must encode as UnixNano, got:\n%s", out)
+	}
+}
+
 // TestGenerateBlitRequiresFullCoverage checks that a struct with a skipped
 // field (goserde:"-" or unexported) never takes the whole-struct memmove, even
 // when every serialized field is fixed-width: the blit would copy the skipped
