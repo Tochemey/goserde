@@ -3,6 +3,7 @@
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/tochemey/goserde/ci.yml)](https://github.com/tochemey/goserde/actions/workflows/ci.yml)
 [![codecov](https://img.shields.io/codecov/c/github/tochemey/goserde?branch=main)](https://codecov.io/gh/tochemey/goserde)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tochemey/goserde.svg)](https://pkg.go.dev/github.com/tochemey/goserde)
+[![Open Source AI Manifesto](https://human-oss.dev/badge.svg)](https://human-oss.dev)
 
 A code-generated, zero-reflection binary serializer for Go, built for maximum encode/decode throughput when you own both ends of the wire.
 
