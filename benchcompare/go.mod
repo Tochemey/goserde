@@ -10,7 +10,7 @@ go 1.26
 require (
 	github.com/deneonet/benc v1.1.8
 	github.com/mus-format/mus-go v0.10.2
-	github.com/tochemey/goserde v0.0.0
+	github.com/tochemey/goserde v0.2.0
 )
 
 require (
